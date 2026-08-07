@@ -46,8 +46,18 @@ export function validateTargetDate(value: unknown): string {
   return targetDate;
 }
 
-function isOptionalAttendeeWarning(value: string): boolean {
-  return /^(?:Calendar attendee|Some Calendar attendee).*unavailable on this macOS\/source\.$/.test(value);
+function isOptionalEventKitWarning(value: string): boolean {
+  return /^(?:EventKit|Some EventKit) (?:calendar|event URL|event title|attendee|attendee display name|attendee email|attendee status) data is unavailable on this macOS\/source\.$/.test(value);
+}
+
+const participantStatuses = new Set(["unknown", "pending", "accepted", "declined", "tentative", "delegated", "completed", "in-process"]);
+
+function parseParticipantStatus(value: unknown, index: number): string {
+  const status = requiredString(value, `attendee ${index} status`);
+  if (!participantStatuses.has(status)) {
+    throw new CalendarPayloadValidationError(`attendee ${index} status is not a stable EventKit status`);
+  }
+  return status;
 }
 
 function parseAttendee(value: unknown, index: number): CalendarAttendee {
@@ -57,7 +67,7 @@ function parseAttendee(value: unknown, index: number): CalendarAttendee {
   return {
     displayName: nullableString(value.displayName, `attendee ${index} displayName`),
     email: nullableString(value.email, `attendee ${index} email`),
-    status: nullableString(value.status, `attendee ${index} status`)
+    status: parseParticipantStatus(value.status, index)
   };
 }
 
@@ -136,8 +146,8 @@ export function validateCalendarPayload(value: unknown): CalendarPayload {
     range: { start, end, timeZone },
     events: value.events.map((event, index) => parseEvent(event, index)),
     warnings: warnings.map((warning) => {
-      if (!isOptionalAttendeeWarning(warning)) {
-        throw new CalendarPayloadValidationError("Calendar bridge warnings may only describe unavailable attendee properties");
+      if (!isOptionalEventKitWarning(warning)) {
+        throw new CalendarPayloadValidationError("Calendar bridge warnings may only describe unavailable optional EventKit data");
       }
       return warning;
     })

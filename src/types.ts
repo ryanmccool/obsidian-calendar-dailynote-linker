@@ -1,7 +1,7 @@
 export interface CalendarAttendee {
   displayName: string | null;
   email: string | null;
-  status: string | null;
+  status: string;
 }
 
 export interface CalendarEvent {

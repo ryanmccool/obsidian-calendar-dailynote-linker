@@ -4,7 +4,7 @@ import { buildPeopleIndex, matchAttendee, matchEventPeople, preparePeopleLinks }
 import { renderCalendarBlock } from "../src/render";
 import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, tryNormalizeExcludedVaultFolders, tryNormalizeSectionHeading } from "../src/settings";
 import { validateCalendarPayload } from "../src/calendarPayload";
-import { fetchCalendarPayload } from "../src/calendarBridge";
+import { CalendarBridgeError, fetchCalendarPayload } from "../src/calendarBridge";
 import { CALENDAR_EVENTS_SCRIPT } from "../src/calendarEventsSource";
 import {
   assertSameDailyNoteProvider,
@@ -39,7 +39,7 @@ function event(overrides: Partial<CalendarEvent>): CalendarEvent {
 function payload(events: CalendarEvent[]): CalendarPayload {
   return {
     schemaVersion: 1,
-    source: "Calendar.app",
+    source: "EventKit",
     targetDate: "2025-01-15",
     range: {
       start: "2025-01-15T05:00:00.000Z",
@@ -165,7 +165,7 @@ describe("Calendar rendering", () => {
 
     const attendeeWins = renderCalendarBlock(payload([event({
       title: "Project",
-      attendees: [{ displayName: "Ada Lovelace", email: null, status: null }]
+      attendees: [{ displayName: "Ada Lovelace", email: null, status: "unknown" }]
     })]), "## Calendar", index);
     expect(attendeeWins).toContain("[[People/Ada.md|Ada]]");
     expect(attendeeWins).not.toContain("[[Projects/Project.md|Project]]");
@@ -217,7 +217,7 @@ describe("People links and settings", () => {
     const linked = preparePeopleLinks(index, (target) => `[[${target.path.replaceAll("|", "\\|")}|${target.basename.replaceAll("|", "\\|")}]]`);
     const rendered = renderCalendarBlock(payload([event({
       title: "Meet Ada",
-      attendees: [{ displayName: "The Enchantress", email: null, status: null }]
+      attendees: [{ displayName: "The Enchantress", email: null, status: "unknown" }]
     })]), "## Calendar", linked);
 
     expect(rendered).toContain("[[People/Team [A]/Ada \\| Lovelace.md|Ada \\| Lovelace]]");
@@ -313,21 +313,88 @@ describe("bridge and payload safety", () => {
     })).rejects.toThrow(/valid calendar date/);
   });
 
-  it("rejects an invalid target date and non-attendee warnings", () => {
+  it("rejects an invalid target date and unknown warnings", () => {
     expect(() => validateCalendarPayload({ ...payload([]), targetDate: "2025-02-30" })).toThrow(/targetDate/);
     expect(() => validateCalendarPayload({ ...payload([]), warnings: ["Calendar enumeration failed"] })).toThrow(/warnings/);
+    expect(validateCalendarPayload({
+      ...payload([]),
+      warnings: ["EventKit calendar data is unavailable on this macOS/source."]
+    }).warnings).toEqual(["EventKit calendar data is unavailable on this macOS/source."]);
   });
 
-  it("keeps the JXA source strict for non-attendee properties", () => {
+  it("uses the native EventKit predicate without Calendar.app scripting", () => {
     const source = readFileSync(resolve(process.cwd(), "scripts/calendar-events.js"), "utf8");
-    expect(source).toContain("function readEventProperty");
-    expect(source).toContain('readEventProperty(calendar, "name")');
-    expect(source).toContain("participationStatus");
-    expect(source).toContain("typeof allDay !== \"boolean\"");
-    expect(source).not.toContain("function readProperty");
-    expect(source).not.toContain("eventValue(event");
-    expect(source).not.toContain('readEventProperty(event, "calendar")');
-    expect(source).not.toContain("calendarName(event)");
+    expect(source).toContain('ObjC.import("EventKit")');
+    expect(source).toContain("$.EKEventStore.alloc.initWithAccessToEntityTypes($.EKEntityMaskEvent)");
+    expect(source).toContain("predicateForEventsWithStartDateEndDateCalendars(start,end,null)");
+    expect(source).toContain("authorizationStatusForEntityType");
+    expect(source).toContain("requestFullAccessToEventsWithCompletion");
+    expect(source).toContain("requestAccessToEntityTypeCompletion");
+    expect(source).toContain('$block("void, bool, id"');
+    expect(source).toContain('readOptionalProperty(event, "URL")');
+    expect(source).toContain('readOptionalProperty(result.value, "title")');
+    expect(source).toContain('readOptionalProperty(participant, "name")');
+    expect(source).toContain('readOptionalProperty(participant, "URL")');
+    expect(source).toContain('"unknown", "pending", "accepted", "declined", "tentative", "delegated", "completed", "in-process"');
+    expect(source).not.toContain('readOptionalProperty(event, "location")');
+    expect(source).not.toContain('readOptionalProperty(event, "notes")');
+    expect(source).not.toContain('Application("Calendar")');
+    expect(source).not.toContain("events.whose");
+    expect(source).not.toContain("_lessThan");
+    expect(source).not.toContain("_greaterThan");
+  });
+
+  it("validates the EventKit payload source and optional-data warnings", () => {
+    const valid = validateCalendarPayload({
+      ...payload([event({
+        id: "event-id",
+        attendees: [{ displayName: null, email: "person@example.com", status: "unknown" }]
+      })]),
+      source: "EventKit",
+      warnings: [
+        "EventKit attendee email data is unavailable on this macOS/source.",
+        "Some EventKit attendee data is unavailable on this macOS/source."
+      ]
+    });
+    expect(valid.source).toBe("EventKit");
+    expect(valid.events[0].id).toBe("event-id");
+    expect(valid.events[0].attendees[0].status).toBe("unknown");
+    expect(() => validateCalendarPayload({
+      ...payload([event({ attendees: [{ displayName: null, email: null, status: null as never }] })]),
+      source: "EventKit"
+    })).toThrow(/status/);
+    expect(() => validateCalendarPayload({
+      ...payload([]),
+      source: "EventKit",
+      warnings: ["Calendar enumeration failed"]
+    })).toThrow(/warnings/);
+  });
+
+  it("only treats stable EventKit permission codes as permission failures", async () => {
+    const permissionError = Object.assign(new Error("osascript failed"), {
+      stderr: "Error: EVENTKIT_PERMISSION_DENIED: access denied\n"
+    });
+    await expect(fetchCalendarPayload("2025-01-15", async () => {
+      throw permissionError;
+    })).rejects.toMatchObject({
+      name: "CalendarBridgeError",
+      isPermissionFailure: true,
+      message: expect.stringContaining("System Settings → Privacy & Security → Calendars")
+    });
+
+    const nativeError = Object.assign(new Error("osascript failed"), {
+      stderr: "Error: EventKit event query failed\n"
+    });
+    await expect(fetchCalendarPayload("2025-01-15", async () => {
+      throw nativeError;
+    })).rejects.toMatchObject({
+      name: "CalendarBridgeError",
+      isPermissionFailure: false,
+      message: "EventKit bridge failed: Error: EventKit event query failed"
+    });
+    await expect(fetchCalendarPayload("2025-01-15", async () => {
+      throw new CalendarBridgeError("EventKit bridge failed: local test");
+    })).rejects.not.toThrow(/Calendars/);
   });
 });
 

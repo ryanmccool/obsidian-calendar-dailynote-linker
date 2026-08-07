@@ -70,7 +70,7 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
     try {
       if (process.platform !== "darwin") {
-        throw new Error("Calendar Daily Note Linker requires macOS desktop and Calendar.app.");
+        throw new Error("Calendar Daily Note Linker requires macOS desktop and Calendar access.");
       }
       const activeFile = this.app.workspace.getActiveFile();
       if (!activeFile || activeFile.extension.toLowerCase() !== "md") {

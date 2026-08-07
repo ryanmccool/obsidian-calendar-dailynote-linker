@@ -23,10 +23,47 @@ const defaultRunner: CalendarCommandRunner = async (executable, args, options) =
 );
 
 export class CalendarBridgeError extends Error {
-  constructor(message: string) {
+  readonly isPermissionFailure: boolean;
+
+  constructor(message: string, isPermissionFailure = false) {
     super(message);
     this.name = "CalendarBridgeError";
+    this.isPermissionFailure = isPermissionFailure;
   }
+}
+
+const permissionCodePattern = /\bEVENTKIT_PERMISSION_(?:DENIED|RESTRICTED|REQUEST_TIMEOUT|UNAVAILABLE)\b/;
+
+function sanitizedDetails(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function permissionCode(value: unknown): string | null {
+  const match = typeof value === "string" ? value.match(permissionCodePattern) : null;
+  return match?.[0] ?? null;
+}
+
+function permissionMessage(code: string): string {
+  return `EventKit Calendar permission failed (${code}). Allow Calendar access in System Settings → Privacy & Security → Calendars, then try again.`;
+}
+
+function nativeFailureMessage(details: string): string {
+  return `EventKit bridge failed: ${details || "no diagnostic details were returned."}`;
+}
+
+function rejectedCommandDetails(error: unknown): { details: string; code: string | null } {
+  const record = error as { stderr?: unknown; message?: unknown };
+  const stderr = sanitizedDetails(record?.stderr);
+  const message = sanitizedDetails(record?.message);
+  return {
+    details: stderr || message,
+    code: permissionCode(`${stderr} ${message}`)
+  };
 }
 
 export async function fetchCalendarPayload(targetDate: string, run: CalendarCommandRunner = defaultRunner): Promise<CalendarPayload> {
@@ -45,18 +82,17 @@ export async function fetchCalendarPayload(targetDate: string, run: CalendarComm
       windowsHide: true
     });
   } catch (error) {
-    const details = error instanceof Error ? error.message : String(error);
-    throw new CalendarBridgeError(
-      "Calendar access failed. Allow Obsidian to control Calendar in System Settings > Privacy & Security > Automation, then try again. " + details
-    );
+    const failure = rejectedCommandDetails(error);
+    if (failure.code) throw new CalendarBridgeError(permissionMessage(failure.code), true);
+    throw new CalendarBridgeError(nativeFailureMessage(failure.details));
   }
 
   const output = result.stdout.trim();
   if (!output) {
-    const details = result.stderr.trim();
-    throw new CalendarBridgeError(
-      `Calendar bridge returned no data. Check Calendar and Automation permissions${details ? `: ${details}` : "."}`
-    );
+    const details = sanitizedDetails(result.stderr);
+    const code = permissionCode(result.stderr);
+    if (code) throw new CalendarBridgeError(permissionMessage(code), true);
+    throw new CalendarBridgeError(nativeFailureMessage(details));
   }
   try {
     const payload = parseCalendarPayloadJson(output);
@@ -65,7 +101,10 @@ export async function fetchCalendarPayload(targetDate: string, run: CalendarComm
     }
     return payload;
   } catch (error) {
-    const details = error instanceof Error ? error.message : String(error);
-    throw new CalendarBridgeError(`Calendar bridge returned malformed data: ${details}`);
+    const validationDetails = sanitizedDetails(error instanceof Error ? error.message : String(error));
+    const stderrDetails = sanitizedDetails(result.stderr);
+    const code = permissionCode(`${stderrDetails} ${validationDetails}`);
+    if (code) throw new CalendarBridgeError(permissionMessage(code), true);
+    throw new CalendarBridgeError(nativeFailureMessage([stderrDetails, validationDetails].filter(Boolean).join(" | ")));
   }
 }
