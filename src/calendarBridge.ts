@@ -32,7 +32,7 @@ export class CalendarBridgeError extends Error {
   }
 }
 
-const permissionCodePattern = /\bEVENTKIT_PERMISSION_(?:DENIED|RESTRICTED|REQUEST_TIMEOUT|UNAVAILABLE)\b/;
+const permissionCodePattern = /\bEVENTKIT_PERMISSION_(?:DENIED|RESTRICTED|WRITE_ONLY|REQUEST_TIMEOUT|UNAVAILABLE)\b/;
 
 function sanitizedDetails(value: unknown): string {
   if (typeof value !== "string") return "";

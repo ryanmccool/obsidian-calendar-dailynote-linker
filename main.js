@@ -15,10 +15,12 @@ var $block = typeof ObjC.block === "function" ? ObjC.block : null;
 var EVENTKIT_AUTH_NOT_DETERMINED = 0;
 var EVENTKIT_AUTH_RESTRICTED = 1;
 var EVENTKIT_AUTH_DENIED = 2;
-var EVENTKIT_AUTH_AUTHORIZED = 3;
+var EVENTKIT_AUTH_FULL_ACCESS = 3;
+var EVENTKIT_AUTH_WRITE_ONLY = 4;
 var EVENTKIT_PERMISSION_CODES = {
   denied: "EVENTKIT_PERMISSION_DENIED",
   restricted: "EVENTKIT_PERMISSION_RESTRICTED",
+  writeOnly: "EVENTKIT_PERMISSION_WRITE_ONLY",
   timeout: "EVENTKIT_PERMISSION_REQUEST_TIMEOUT",
   unavailable: "EVENTKIT_PERMISSION_UNAVAILABLE"
 };
@@ -258,7 +260,7 @@ function waitForPermissionRequest(completionFinished, store) {
   if (!completionFinished.value) throw permissionError(EVENTKIT_PERMISSION_CODES.timeout);
 }
 
-function requestEventKitAccess(store) {
+function requestEventKitAccess(store, currentStatus) {
   var completionFinished = { value: false };
   var granted = { value: false };
   var completion;
@@ -270,6 +272,11 @@ function requestEventKitAccess(store) {
     });
   } catch (error) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
+  }
+
+  if (currentStatus === EVENTKIT_AUTH_WRITE_ONLY && typeof store.requestFullAccessToEventsWithCompletion !== "function") {
+    // Older EventKit cannot upgrade an existing write-only grant to read access.
+    throw permissionError(EVENTKIT_PERMISSION_CODES.writeOnly);
   }
 
   try {
@@ -286,7 +293,8 @@ function requestEventKitAccess(store) {
 
   waitForPermissionRequest(completionFinished, store);
   var status = authorizationStatus();
-  if (status === EVENTKIT_AUTH_AUTHORIZED && granted.value) return;
+  if (status === EVENTKIT_AUTH_FULL_ACCESS && granted.value) return;
+  if (status === EVENTKIT_AUTH_WRITE_ONLY) throw permissionError(EVENTKIT_PERMISSION_CODES.writeOnly);
   if (status === EVENTKIT_AUTH_RESTRICTED) throw permissionError(EVENTKIT_PERMISSION_CODES.restricted);
   if (status === EVENTKIT_AUTH_DENIED || !granted.value) throw permissionError(EVENTKIT_PERMISSION_CODES.denied);
   throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
@@ -296,7 +304,7 @@ function eventStore() {
   var status = authorizationStatus();
   if (status === EVENTKIT_AUTH_DENIED) throw permissionError(EVENTKIT_PERMISSION_CODES.denied);
   if (status === EVENTKIT_AUTH_RESTRICTED) throw permissionError(EVENTKIT_PERMISSION_CODES.restricted);
-  if (status !== EVENTKIT_AUTH_NOT_DETERMINED && status !== EVENTKIT_AUTH_AUTHORIZED) {
+  if (status !== EVENTKIT_AUTH_NOT_DETERMINED && status !== EVENTKIT_AUTH_FULL_ACCESS && status !== EVENTKIT_AUTH_WRITE_ONLY) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
   }
 
@@ -306,7 +314,7 @@ function eventStore() {
   } catch (error) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
   }
-  if (status === EVENTKIT_AUTH_NOT_DETERMINED) requestEventKitAccess(store);
+  if (status === EVENTKIT_AUTH_NOT_DETERMINED || status === EVENTKIT_AUTH_WRITE_ONLY) requestEventKitAccess(store, status);
   return store;
 }
 
@@ -400,7 +408,7 @@ function run(argv) {
   if (!argv || argv.length !== 1) throw new Error("Calendar target date argument is required.");
   return main(argv[0]);
 }
-`;var Me=(0,te.promisify)(ee.execFile),Ve=async(e,t,n)=>await Me(e,t,n),h=class extends Error{constructor(t,n=!1){super(t),this.name="CalendarBridgeError",this.isPermissionFailure=n}},Re=/\bEVENTKIT_PERMISSION_(?:DENIED|RESTRICTED|REQUEST_TIMEOUT|UNAVAILABLE)\b/;function k(e){return typeof e!="string"?"":e.replace(/[\u0000-\u001f\u007f-\u009f]/gu," ").replace(/\s+/gu," ").trim().slice(0,500)}function z(e){return(typeof e=="string"?e.match(Re):null)?.[0]??null}function L(e){return`EventKit Calendar permission failed (${e}). Allow Calendar access in System Settings \u2192 Privacy & Security \u2192 Calendars, then try again.`}function _(e){return`EventKit bridge failed: ${e||"no diagnostic details were returned."}`}function Ye(e){let t=e,n=k(t?.stderr),i=k(t?.message);return{details:n||i,code:z(`${n} ${i}`)}}async function ne(e,t=Ve){try{Y(e)}catch(r){throw new h(r instanceof Error?r.message:"Calendar target date must be YYYY-MM-DD.")}let n;try{n=await t("/usr/bin/osascript",["-l","JavaScript","-e",X,e],{encoding:"utf8",timeout:3e4,maxBuffer:2*1024*1024,shell:!1,windowsHide:!0})}catch(r){let a=Ye(r);throw a.code?new h(L(a.code),!0):new h(_(a.details))}let i=n.stdout.trim();if(!i){let r=k(n.stderr),a=z(n.stderr);throw a?new h(L(a),!0):new h(_(r))}try{let r=Q(i);if(r.targetDate!==e)throw new Error(`Calendar bridge returned ${r.targetDate} instead of ${e}.`);return r}catch(r){let a=k(r instanceof Error?r.message:String(r)),o=k(n.stderr),s=z(`${o} ${a}`);throw s?new h(L(s),!0):new h(_([o,a].filter(Boolean).join(" | ")))}}function U(e,t,n){if(!t)return;let i=e.get(t)??[];i.some(r=>r.path===n.path)||(i.push(n),i.sort((r,a)=>r.path.localeCompare(a.path))),e.set(t,i)}function S(e){return e.normalize("NFKC").trim().replace(/\s+/gu," ").toLowerCase()}function re(e){return e.normalize("NFKC").trim().replace(/\s+/gu,"").toLowerCase()}function O(e,t){let n=e?.[t];return typeof n=="string"?[n]:Array.isArray(n)?n.filter(i=>typeof i=="string"):[]}function Le(e){let t=e.path.replaceAll("\\","/"),n=e.basename||t.split("/").at(-1)?.replace(/\.md$/i,"")||"";return{path:t,basename:n,file:e.file}}function _e(e,t){let n=e.replaceAll("\\","/");return t.some(i=>{let r=i.replaceAll("\\","/").replace(/\/+$/u,"");return n===r||n.startsWith(`${r}/`)})}function ie(e,t){let n=new Map,i=new Map;for(let r of e){let a=r.path.replaceAll("\\","/");if(!a.toLowerCase().endsWith(".md")||_e(a,t))continue;let o=Le(r);U(i,S(o.basename),o);for(let s of O(r.frontmatter,"aliases"))U(i,S(s),o);for(let s of[...O(r.frontmatter,"email"),...O(r.frontmatter,"emails")])U(n,re(s),o)}return{byEmail:n,byName:i}}function ze(e,t){let n=t.email?re(t.email):"";if(n){let a=e.byEmail.get(n);if(a?.length===1)return a[0];if(a&&a.length>1)return null}let i=t.displayName?S(t.displayName):"";if(!i)return null;let r=e.byName.get(i);return r?.length===1?r[0]:null}function Ue(e,t){let n=[];for(let i of t){let r=ze(e,i);r&&!n.some(a=>a.path===r.path)&&n.push(r)}return n}function ae(e,t,n){let i=Ue(e,t);if(i.length>0)return i;let r=e.byName.get(S(n));return r?.length===1?[r[0]]:[]}function oe(e,t){let n=new Map,i=r=>r.map(a=>{let o=n.get(a.path);return o===void 0&&(o=t(a),n.set(a.path,o)),{...a,markdownLink:o}});return{byEmail:new Map([...e.byEmail].map(([r,a])=>[r,i(a)])),byName:new Map([...e.byName].map(([r,a])=>[r,i(a)]))}}var P="<!-- calendar-daily-note-linker:start -->",b="<!-- calendar-daily-note-linker:end -->",C=class extends Error{constructor(t){super(t),this.name="CalendarBlockError"}};function le(e){return[P,...e.map(ce),b].join(`
+`;var Me=(0,te.promisify)(ee.execFile),Ve=async(e,t,n)=>await Me(e,t,n),h=class extends Error{constructor(t,n=!1){super(t),this.name="CalendarBridgeError",this.isPermissionFailure=n}},Re=/\bEVENTKIT_PERMISSION_(?:DENIED|RESTRICTED|WRITE_ONLY|REQUEST_TIMEOUT|UNAVAILABLE)\b/;function k(e){return typeof e!="string"?"":e.replace(/[\u0000-\u001f\u007f-\u009f]/gu," ").replace(/\s+/gu," ").trim().slice(0,500)}function z(e){return(typeof e=="string"?e.match(Re):null)?.[0]??null}function L(e){return`EventKit Calendar permission failed (${e}). Allow Calendar access in System Settings \u2192 Privacy & Security \u2192 Calendars, then try again.`}function _(e){return`EventKit bridge failed: ${e||"no diagnostic details were returned."}`}function Ye(e){let t=e,n=k(t?.stderr),i=k(t?.message);return{details:n||i,code:z(`${n} ${i}`)}}async function ne(e,t=Ve){try{Y(e)}catch(r){throw new h(r instanceof Error?r.message:"Calendar target date must be YYYY-MM-DD.")}let n;try{n=await t("/usr/bin/osascript",["-l","JavaScript","-e",X,e],{encoding:"utf8",timeout:3e4,maxBuffer:2*1024*1024,shell:!1,windowsHide:!0})}catch(r){let a=Ye(r);throw a.code?new h(L(a.code),!0):new h(_(a.details))}let i=n.stdout.trim();if(!i){let r=k(n.stderr),a=z(n.stderr);throw a?new h(L(a),!0):new h(_(r))}try{let r=Q(i);if(r.targetDate!==e)throw new Error(`Calendar bridge returned ${r.targetDate} instead of ${e}.`);return r}catch(r){let a=k(r instanceof Error?r.message:String(r)),o=k(n.stderr),s=z(`${o} ${a}`);throw s?new h(L(s),!0):new h(_([o,a].filter(Boolean).join(" | ")))}}function U(e,t,n){if(!t)return;let i=e.get(t)??[];i.some(r=>r.path===n.path)||(i.push(n),i.sort((r,a)=>r.path.localeCompare(a.path))),e.set(t,i)}function S(e){return e.normalize("NFKC").trim().replace(/\s+/gu," ").toLowerCase()}function re(e){return e.normalize("NFKC").trim().replace(/\s+/gu,"").toLowerCase()}function O(e,t){let n=e?.[t];return typeof n=="string"?[n]:Array.isArray(n)?n.filter(i=>typeof i=="string"):[]}function Le(e){let t=e.path.replaceAll("\\","/"),n=e.basename||t.split("/").at(-1)?.replace(/\.md$/i,"")||"";return{path:t,basename:n,file:e.file}}function _e(e,t){let n=e.replaceAll("\\","/");return t.some(i=>{let r=i.replaceAll("\\","/").replace(/\/+$/u,"");return n===r||n.startsWith(`${r}/`)})}function ie(e,t){let n=new Map,i=new Map;for(let r of e){let a=r.path.replaceAll("\\","/");if(!a.toLowerCase().endsWith(".md")||_e(a,t))continue;let o=Le(r);U(i,S(o.basename),o);for(let s of O(r.frontmatter,"aliases"))U(i,S(s),o);for(let s of[...O(r.frontmatter,"email"),...O(r.frontmatter,"emails")])U(n,re(s),o)}return{byEmail:n,byName:i}}function ze(e,t){let n=t.email?re(t.email):"";if(n){let a=e.byEmail.get(n);if(a?.length===1)return a[0];if(a&&a.length>1)return null}let i=t.displayName?S(t.displayName):"";if(!i)return null;let r=e.byName.get(i);return r?.length===1?r[0]:null}function Ue(e,t){let n=[];for(let i of t){let r=ze(e,i);r&&!n.some(a=>a.path===r.path)&&n.push(r)}return n}function ae(e,t,n){let i=Ue(e,t);if(i.length>0)return i;let r=e.byName.get(S(n));return r?.length===1?[r[0]]:[]}function oe(e,t){let n=new Map,i=r=>r.map(a=>{let o=n.get(a.path);return o===void 0&&(o=t(a),n.set(a.path,o)),{...a,markdownLink:o}});return{byEmail:new Map([...e.byEmail].map(([r,a])=>[r,i(a)])),byName:new Map([...e.byName].map(([r,a])=>[r,i(a)]))}}var P="<!-- calendar-daily-note-linker:start -->",b="<!-- calendar-daily-note-linker:end -->",C=class extends Error{constructor(t){super(t),this.name="CalendarBlockError"}};function le(e){return[P,...e.map(ce),b].join(`
 `)}function de(e,t){Oe(t);let n=[],i=[],r=e.split(`
 `);if(r.forEach((s,l)=>{let p=s.endsWith("\r")?s.slice(0,-1):s,f=p===P,y=p===b;if(f&&n.push(l),y&&i.push(l),(p.includes(P)||p.includes(b))&&!f&&!y)throw new C("The Calendar section marker must be on an exact standalone line.")}),n.length===0&&i.length===0)return He(e,t);if(n.length!==1||i.length!==1||n[0]>=i[0])throw new C("The Calendar section markers are duplicated, incomplete, or out of order.");let a=se(r,n[0]),o=se(r,i[0]+1);return`${e.slice(0,a)}${t}${e.slice(o)}`}function Oe(e){let t=e.split(`
 `).map(n=>n.endsWith("\r")?n.slice(0,-1):n);if(t[0]!==P||t[t.length-1]!==b)throw new C("Generated Calendar content has invalid section markers.");if(t.slice(1,-1).some(n=>n.includes(P)||n.includes(b)))throw new C("Generated Calendar content contains a section marker literal.")}function ce(e){return e.replace(/\r\n?|\n|\u2028|\u2029/gu," ").replace(/[\u0000-\u001f\u007f-\u009f]/gu,"").replaceAll(P,"[calendar section start]").replaceAll(b,"[calendar section end]")}function H(e){return ce(e).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replace(/[\\`*_{}\[\]()#+\-.!|>~]/gu,"\\$&")}function He(e,t){let n=e.length>0&&!e.endsWith(`

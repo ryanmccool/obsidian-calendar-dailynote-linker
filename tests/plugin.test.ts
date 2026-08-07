@@ -328,6 +328,13 @@ describe("bridge and payload safety", () => {
     expect(source).toContain("$.EKEventStore.alloc.initWithAccessToEntityTypes($.EKEntityMaskEvent)");
     expect(source).toContain("predicateForEventsWithStartDateEndDateCalendars(start,end,null)");
     expect(source).toContain("authorizationStatusForEntityType");
+    expect(source).toContain("var EVENTKIT_AUTH_FULL_ACCESS = 3;");
+    expect(source).toContain("var EVENTKIT_AUTH_WRITE_ONLY = 4;");
+    expect(source).toContain("status === EVENTKIT_AUTH_WRITE_ONLY");
+    expect(source).toContain("status === EVENTKIT_AUTH_NOT_DETERMINED || status === EVENTKIT_AUTH_WRITE_ONLY");
+    expect(source).toContain("if (status === EVENTKIT_AUTH_FULL_ACCESS && granted.value) return;");
+    expect(source).toContain("if (status === EVENTKIT_AUTH_WRITE_ONLY) throw permissionError(EVENTKIT_PERMISSION_CODES.writeOnly);");
+    expect(source).toContain('writeOnly: "EVENTKIT_PERMISSION_WRITE_ONLY"');
     expect(source).toContain("requestFullAccessToEventsWithCompletion");
     expect(source).toContain("requestAccessToEntityTypeCompletion");
     expect(source).toContain('$block("void, bool, id"');
@@ -380,6 +387,17 @@ describe("bridge and payload safety", () => {
       name: "CalendarBridgeError",
       isPermissionFailure: true,
       message: expect.stringContaining("System Settings → Privacy & Security → Calendars")
+    });
+
+    const writeOnlyError = Object.assign(new Error("osascript failed"), {
+      stderr: "Error: EVENTKIT_PERMISSION_WRITE_ONLY: access is write-only\n"
+    });
+    await expect(fetchCalendarPayload("2025-01-15", async () => {
+      throw writeOnlyError;
+    })).rejects.toMatchObject({
+      name: "CalendarBridgeError",
+      isPermissionFailure: true,
+      message: expect.stringContaining("EVENTKIT_PERMISSION_WRITE_ONLY")
     });
 
     const nativeError = Object.assign(new Error("osascript failed"), {

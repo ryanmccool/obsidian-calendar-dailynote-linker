@@ -15,10 +15,12 @@ var $block = typeof ObjC.block === "function" ? ObjC.block : null;
 var EVENTKIT_AUTH_NOT_DETERMINED = 0;
 var EVENTKIT_AUTH_RESTRICTED = 1;
 var EVENTKIT_AUTH_DENIED = 2;
-var EVENTKIT_AUTH_AUTHORIZED = 3;
+var EVENTKIT_AUTH_FULL_ACCESS = 3;
+var EVENTKIT_AUTH_WRITE_ONLY = 4;
 var EVENTKIT_PERMISSION_CODES = {
   denied: "EVENTKIT_PERMISSION_DENIED",
   restricted: "EVENTKIT_PERMISSION_RESTRICTED",
+  writeOnly: "EVENTKIT_PERMISSION_WRITE_ONLY",
   timeout: "EVENTKIT_PERMISSION_REQUEST_TIMEOUT",
   unavailable: "EVENTKIT_PERMISSION_UNAVAILABLE"
 };
@@ -258,7 +260,7 @@ function waitForPermissionRequest(completionFinished, store) {
   if (!completionFinished.value) throw permissionError(EVENTKIT_PERMISSION_CODES.timeout);
 }
 
-function requestEventKitAccess(store) {
+function requestEventKitAccess(store, currentStatus) {
   var completionFinished = { value: false };
   var granted = { value: false };
   var completion;
@@ -270,6 +272,11 @@ function requestEventKitAccess(store) {
     });
   } catch (error) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
+  }
+
+  if (currentStatus === EVENTKIT_AUTH_WRITE_ONLY && typeof store.requestFullAccessToEventsWithCompletion !== "function") {
+    // Older EventKit cannot upgrade an existing write-only grant to read access.
+    throw permissionError(EVENTKIT_PERMISSION_CODES.writeOnly);
   }
 
   try {
@@ -286,7 +293,8 @@ function requestEventKitAccess(store) {
 
   waitForPermissionRequest(completionFinished, store);
   var status = authorizationStatus();
-  if (status === EVENTKIT_AUTH_AUTHORIZED && granted.value) return;
+  if (status === EVENTKIT_AUTH_FULL_ACCESS && granted.value) return;
+  if (status === EVENTKIT_AUTH_WRITE_ONLY) throw permissionError(EVENTKIT_PERMISSION_CODES.writeOnly);
   if (status === EVENTKIT_AUTH_RESTRICTED) throw permissionError(EVENTKIT_PERMISSION_CODES.restricted);
   if (status === EVENTKIT_AUTH_DENIED || !granted.value) throw permissionError(EVENTKIT_PERMISSION_CODES.denied);
   throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
@@ -296,7 +304,7 @@ function eventStore() {
   var status = authorizationStatus();
   if (status === EVENTKIT_AUTH_DENIED) throw permissionError(EVENTKIT_PERMISSION_CODES.denied);
   if (status === EVENTKIT_AUTH_RESTRICTED) throw permissionError(EVENTKIT_PERMISSION_CODES.restricted);
-  if (status !== EVENTKIT_AUTH_NOT_DETERMINED && status !== EVENTKIT_AUTH_AUTHORIZED) {
+  if (status !== EVENTKIT_AUTH_NOT_DETERMINED && status !== EVENTKIT_AUTH_FULL_ACCESS && status !== EVENTKIT_AUTH_WRITE_ONLY) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
   }
 
@@ -306,7 +314,7 @@ function eventStore() {
   } catch (error) {
     throw permissionError(EVENTKIT_PERMISSION_CODES.unavailable);
   }
-  if (status === EVENTKIT_AUTH_NOT_DETERMINED) requestEventKitAccess(store);
+  if (status === EVENTKIT_AUTH_NOT_DETERMINED || status === EVENTKIT_AUTH_WRITE_ONLY) requestEventKitAccess(store, status);
   return store;
 }
 
