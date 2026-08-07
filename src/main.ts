@@ -1,5 +1,4 @@
-import { Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { getDateFromFile, getDailyNoteSettings } from "obsidian-daily-notes-interface";
+import { moment, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { fetchCalendarPayload, CalendarBridgeError } from "./calendarBridge";
 import { buildPeopleIndex, preparePeopleLinks, type PeopleMarkdownFile } from "./invitees";
 import { replaceCalendarBlock } from "./block";
@@ -14,9 +13,15 @@ import {
   type PluginSettings
 } from "./settings";
 import type { CalendarPayload } from "./types";
-import { assertCoreDailyNotes, DailyNotesModeError } from "./dailyNotesGuard";
-import { ActiveDailyNoteError, assertActiveDailyNoteUnchanged, resolveActiveDailyDate } from "./activeDailyNote";
+import { ActiveDailyNoteError, assertActiveDailyNoteUnchanged } from "./activeDailyNote";
 import { summarizeImportOutcome } from "./summary";
+import {
+  assertSameDailyNoteProvider,
+  DailyNoteProviderError,
+  inspectDailyNoteProviders,
+  resolveActiveDailyNoteProvider,
+  type ResolvedDailyNoteProvider
+} from "./dailyNoteProviders";
 
 export default class CalendarDailyNoteLinkerPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
@@ -67,30 +72,27 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       if (process.platform !== "darwin") {
         throw new Error("Calendar Daily Note Linker requires macOS desktop and Calendar.app.");
       }
-      assertCoreDailyNotes(this.app);
       const activeFile = this.app.workspace.getActiveFile();
       if (!activeFile || activeFile.extension.toLowerCase() !== "md") {
-        throw new ActiveDailyNoteError("Open an existing core Daily Note before running this command.");
+        throw new ActiveDailyNoteError("Open an existing configured Daily Note before running this command.");
       }
-
-      assertCoreDailyNotes(this.app);
-      const dailySettings = getDailyNoteSettings();
-      if (!dailySettings) throw new Error("Daily Notes settings are unavailable.");
-      assertCoreDailyNotes(this.app);
-      const parseDateFromPath = (relativeStem: string, format: string) =>
-        (window.moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(relativeStem, format, true);
-      const createDateFromIso = (isoDate: string) =>
-        (window.moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(isoDate, "YYYY-MM-DD", true);
-      const targetDate = resolveActiveDailyDate(
-        activeFile,
-        dailySettings,
-        parseDateFromPath,
-        (file) => getDateFromFile(file as typeof activeFile, "day"),
-        createDateFromIso
-      );
       if (this.excludedVaultFoldersPersistedInvalid) {
         throw new Error("Saved vault folder exclusions are invalid. Correct them in settings before importing Calendar events.");
       }
+
+      const parseDateFromPath = (relativeStem: string, format: string) =>
+        (moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(relativeStem, format, true);
+      const createDateFromIso = (isoDate: string) =>
+        (moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(isoDate, "YYYY-MM-DD", true);
+      const initialInspection = inspectDailyNoteProviders(this.app);
+      const initialProvider: ResolvedDailyNoteProvider = resolveActiveDailyNoteProvider(
+        activeFile,
+        initialInspection.candidates,
+        parseDateFromPath,
+        createDateFromIso,
+        initialInspection.errors
+      );
+      const targetDate = initialProvider.targetDate;
 
       progress.setMessage(`Reading Calendar for ${targetDate}…`);
       const payload: CalendarPayload = await fetchCalendarPayload(targetDate);
@@ -115,29 +117,26 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       const rendered = renderCalendarBlockWithSummary(payload, this.settings.sectionHeading, people);
 
       progress.setMessage("Writing the active Daily Note…");
-      assertCoreDailyNotes(this.app);
       const currentFile = this.app.workspace.getActiveFile();
       if (!currentFile || this.app.vault.getAbstractFileByPath(activeFile.path) !== activeFile) {
         throw new ActiveDailyNoteError("The active Daily Note changed, moved, or was deleted; import aborted before writing.");
       }
-      assertCoreDailyNotes(this.app);
-      const currentSettings = getDailyNoteSettings();
-      if (!currentSettings) throw new ActiveDailyNoteError("Core Daily Notes settings changed; import aborted before writing.");
-      assertCoreDailyNotes(this.app);
-      const currentDate = resolveActiveDailyDate(
+      const currentInspection = inspectDailyNoteProviders(this.app);
+      const currentProvider = resolveActiveDailyNoteProvider(
         currentFile,
-        currentSettings,
+        currentInspection.candidates,
         parseDateFromPath,
-        (file) => getDateFromFile(file as typeof activeFile, "day"),
-        createDateFromIso
+        createDateFromIso,
+        currentInspection.errors
       );
-      assertActiveDailyNoteUnchanged(activeFile, currentFile, dailySettings, currentSettings, targetDate, currentDate);
+      assertActiveDailyNoteUnchanged(activeFile, currentFile, initialProvider.settings, currentProvider.settings, targetDate, currentProvider.targetDate);
+      assertSameDailyNoteProvider(initialProvider, currentProvider);
       await this.app.vault.process(activeFile, (content) => replaceCalendarBlock(content, rendered.block));
       finish(summarizeImportOutcome(targetDate, activeFile.basename, rendered.eventCount, rendered.linkCount));
     } catch (error) {
       const message = error instanceof CalendarBridgeError
         ? error.message
-        : error instanceof DailyNotesModeError || error instanceof ActiveDailyNoteError
+        : error instanceof DailyNoteProviderError || error instanceof ActiveDailyNoteError
           ? error.message
           : `Could not import Calendar events: ${error instanceof Error ? error.message : String(error)}`;
       finish(message);
@@ -186,7 +185,7 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
       });
 
     containerEl.createEl("p", {
-      text: "Open an existing core Daily Note, then run the command; it updates that open note for its date."
+      text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date."
     });
   }
 

@@ -87,7 +87,7 @@ export function resolveActiveDailyDate(
   createDateFromIso?: (isoDate: string) => ParsedDailyDate | null
 ): string {
   if (file.extension.toLowerCase() !== "md") {
-    throw new ActiveDailyNoteError("Open an existing core Daily Note before running this command.");
+    throw new ActiveDailyNoteError("Open an existing configured Daily Note before running this command.");
   }
   if (!isUnambiguousDailyFormat(settings.format)) {
     throw new ActiveDailyNoteError("The core Daily Notes filename format cannot identify one calendar date.");

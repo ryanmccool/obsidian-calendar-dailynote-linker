@@ -6,7 +6,12 @@ import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedE
 import { validateCalendarPayload } from "../src/calendarPayload";
 import { fetchCalendarPayload } from "../src/calendarBridge";
 import { CALENDAR_EVENTS_SCRIPT } from "../src/calendarEventsSource";
-import { assertCoreDailyNotes, getDailyNotesMode } from "../src/dailyNotesGuard";
+import {
+  assertSameDailyNoteProvider,
+  getDailyNoteProviderCandidates,
+  inspectDailyNoteProviders,
+  resolveActiveDailyNoteProvider
+} from "../src/dailyNoteProviders";
 import { ensureDailyNotesFolder } from "../src/dailyNotesFolder";
 import { assertActiveDailyNoteUnchanged, resolveActiveDailyDate } from "../src/activeDailyNote";
 import { summarizeImportOutcome } from "../src/summary";
@@ -326,26 +331,76 @@ describe("bridge and payload safety", () => {
   });
 });
 
-describe("Daily Notes compatibility guard", () => {
-  it("requires core Daily Notes and rejects Periodic Notes daily mode", () => {
-    expect(getDailyNotesMode({ internalPlugins: { plugins: {} }, plugins: {} })).toBe("disabled");
-    expect(getDailyNotesMode({
-      internalPlugins: { plugins: { "daily-notes": { enabled: true } } },
-      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true } } }) }
-    })).toBe("periodic");
-    expect(getDailyNotesMode({
+describe("Daily Notes provider resolution", () => {
+  const parseMoment = (stem: string, format: string, strict = true) => moment(stem, format, strict);
+  const createMoment = (isoDate: string) => moment(isoDate, "YYYY-MM-DD", true);
+  const coreOptions = { folder: "Calendar/Daily", format: "YYYY/MM/YYYY-MM-DD", template: "" };
+  const activeCoreFile = { path: "Calendar/Daily/2026/08/2026-08-06.md", basename: "2026-08-06", extension: "md" };
+
+  it("selects the exact installed core configuration even when Periodic daily settings exist", () => {
+    const app = {
+      internalPlugins: { plugins: { "daily-notes": { enabled: true, instance: { options: coreOptions } } } },
+      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true, folder: "Other", format: "YYYY-MM-DD", template: "" } } }) }
+    };
+    const candidates = getDailyNoteProviderCandidates(app);
+    const selected = resolveActiveDailyNoteProvider(activeCoreFile, candidates, parseMoment, createMoment);
+    expect(selected.kind).toBe("core");
+    expect(selected.targetDate).toBe("2026-08-06");
+  });
+
+  it("selects a Periodic-only active Daily Note", () => {
+    const file = { path: "Periodic/2026/08/2026-08-06.md", basename: "2026-08-06", extension: "md" };
+    const app = {
+      internalPlugins: { plugins: { "daily-notes": { enabled: false, instance: { options: coreOptions } } } },
+      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true, folder: "Periodic", format: "YYYY/MM/YYYY-MM-DD", template: "" } } }) }
+    };
+    const selected = resolveActiveDailyNoteProvider(file, getDailyNoteProviderCandidates(app), parseMoment, createMoment);
+    expect(selected.kind).toBe("periodic");
+    expect(selected.targetDate).toBe("2026-08-06");
+  });
+
+  it("defaults empty provider formats safely for Core and Periodic Notes", () => {
+    const coreFile = { path: "Core/2026-08-06.md", basename: "2026-08-06", extension: "md" };
+    const coreApp = {
+      internalPlugins: { plugins: { "daily-notes": { enabled: true, instance: { options: { folder: "Core", format: " ", template: "" } } } } },
+      plugins: { getPlugin: () => undefined }
+    };
+    const periodicFile = { path: "Periodic/2026-08-06.md", basename: "2026-08-06", extension: "md" };
+    const periodicApp = {
+      internalPlugins: { plugins: {} },
+      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true, folder: "Periodic", format: "", template: "" } } }) }
+    };
+    expect(resolveActiveDailyNoteProvider(coreFile, getDailyNoteProviderCandidates(coreApp), parseMoment, createMoment).kind).toBe("core");
+    expect(resolveActiveDailyNoteProvider(periodicFile, getDailyNoteProviderCandidates(periodicApp), parseMoment, createMoment).kind).toBe("periodic");
+  });
+
+  it("reports provider-specific compatibility errors for malformed shapes", () => {
+    const coreInspection = inspectDailyNoteProviders({
       internalPlugins: { plugins: { "daily-notes": { enabled: true } } },
       plugins: { getPlugin: () => undefined }
-    })).toBe("core");
-    expect(() => assertCoreDailyNotes({ internalPlugins: { plugins: {} }, plugins: {} })).toThrow();
-    expect(() => assertCoreDailyNotes({
-      internalPlugins: { plugins: { "daily-notes": { enabled: true } } },
-      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true } } }) }
-    })).toThrow(/Periodic Notes/);
-    expect(() => assertCoreDailyNotes({
-      internalPlugins: { plugins: { "daily-notes": { enabled: true } } },
+    });
+    expect(coreInspection.errors.some((error) => error.kind === "core" && /Core Daily Notes/.test(error.message))).toBe(true);
+
+    const periodicInspection = inspectDailyNoteProviders({
+      internalPlugins: { plugins: {} },
+      plugins: { getPlugin: () => ({ settings: { daily: { enabled: true, folder: [] } } }) }
+    });
+    expect(periodicInspection.errors.some((error) => error.kind === "periodic" && /Periodic Notes/.test(error.message))).toBe(true);
+  });
+
+  it("rejects an active file that matches no configured provider", () => {
+    const app = { internalPlugins: { plugins: {} }, plugins: { getPlugin: () => undefined } };
+    expect(() => resolveActiveDailyNoteProvider(activeCoreFile, getDailyNoteProviderCandidates(app), parseMoment, createMoment)).toThrow(/does not match/);
+  });
+
+  it("rejects a provider or configuration change before writing", () => {
+    const app = {
+      internalPlugins: { plugins: { "daily-notes": { enabled: true, instance: { options: coreOptions } } } },
       plugins: { getPlugin: () => undefined }
-    })).not.toThrow();
+    };
+    const initial = resolveActiveDailyNoteProvider(activeCoreFile, getDailyNoteProviderCandidates(app), parseMoment, createMoment);
+    const changed = { ...initial, settings: { ...initial.settings, format: "YYYY-MM-DD" } };
+    expect(() => assertSameDailyNoteProvider(initial, changed)).toThrow(/provider or configuration/);
   });
 });
 
@@ -358,7 +413,7 @@ describe("active Daily Note resolution and outcome summaries", () => {
   it("uses the active filename date and enforces the configured folder boundary", () => {
     expect(resolveActiveDailyDate(file, settings, parseMoment, undefined, createMoment)).toBe("2025-01-14");
     expect(() => resolveActiveDailyDate({ ...file, path: "Journal/DailyArchive/2025-01-14.md" }, settings, parseMoment, undefined, createMoment)).toThrow(/outside/);
-    expect(() => resolveActiveDailyDate({ ...file, extension: "canvas" }, settings, parseMoment, undefined, createMoment)).toThrow(/existing core/);
+    expect(() => resolveActiveDailyDate({ ...file, extension: "canvas" }, settings, parseMoment, undefined, createMoment)).toThrow(/existing configured/);
   });
 
   it("rejects ambiguous configured formats with real Moment parsing", () => {
