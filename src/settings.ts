@@ -25,13 +25,17 @@ export function normalizePeopleFolder(value: unknown): string {
   return normalized;
 }
 
-export function normalizeSectionHeading(value: unknown): string {
+export function tryNormalizeSectionHeading(value: unknown): string | undefined {
   if (typeof value !== "string") {
-    return DEFAULT_SETTINGS.sectionHeading;
+    return undefined;
   }
   const heading = value.trim().replace(/[\r\n]+/g, " ").replace(/\s+/g, " ");
   if (!/^#{1,6}\s+\S/.test(heading) || heading.includes("<!--") || heading.includes("-->") || heading.includes("\0")) {
-    return DEFAULT_SETTINGS.sectionHeading;
+    return undefined;
   }
   return heading;
+}
+
+export function normalizeSectionHeading(value: unknown): string {
+  return tryNormalizeSectionHeading(value) ?? DEFAULT_SETTINGS.sectionHeading;
 }

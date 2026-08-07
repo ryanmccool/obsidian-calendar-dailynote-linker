@@ -13,6 +13,7 @@ import {
   DEFAULT_SETTINGS,
   normalizePeopleFolder,
   normalizeSectionHeading,
+  tryNormalizeSectionHeading,
   type PluginSettings
 } from "./settings";
 import type { CalendarPayload } from "./types";
@@ -182,14 +183,34 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Section heading")
-      .setDesc("Markdown heading used inside the managed Calendar section, for example ## Calendar.")
-      .addText((text) => text
-        .setPlaceholder(DEFAULT_SETTINGS.sectionHeading)
-        .setValue(this.plugin.settings.sectionHeading)
-        .onChange(async (value) => {
-          this.plugin.settings.sectionHeading = normalizeSectionHeading(value);
-          text.setValue(this.plugin.settings.sectionHeading);
-          await this.plugin.saveSettings();
-        }));
+      .setDesc("Markdown heading used inside the managed Calendar section; saves when focus leaves the field (for example ## Calendar).")
+      .addText((text) => {
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.sectionHeading)
+          .setValue(this.plugin.settings.sectionHeading);
+        text.inputEl.addEventListener("blur", () => {
+          void this.commitSectionHeading(text);
+        });
+      });
+  }
+
+  private async commitSectionHeading(text: import("obsidian").TextComponent): Promise<void> {
+    const previous = this.plugin.settings.sectionHeading;
+    const normalized = tryNormalizeSectionHeading(text.getValue());
+    if (!normalized) {
+      text.setValue(previous);
+      new Notice("Use a Markdown heading from # to ######, such as ## Calendar.");
+      return;
+    }
+
+    this.plugin.settings.sectionHeading = normalized;
+    text.setValue(normalized);
+    try {
+      await this.plugin.saveSettings();
+    } catch (error) {
+      this.plugin.settings.sectionHeading = previous;
+      text.setValue(previous);
+      new Notice(`Could not save the Section heading: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

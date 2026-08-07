@@ -1,7 +1,7 @@
 {
   "id": "calendar-daily-note-linker",
   "name": "Calendar Daily Note Linker",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
   "description": "Add today's Calendar.app events and deterministic People links to the Daily Note.",
   "author": "Calendar Daily Note Linker contributors",

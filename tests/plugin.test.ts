@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { replaceCalendarBlock } from "../src/block";
 import { buildPeopleIndex, matchAttendee, preparePeopleLinks } from "../src/invitees";
 import { renderCalendarBlock } from "../src/render";
-import { normalizePeopleFolder } from "../src/settings";
+import { normalizePeopleFolder, normalizeSectionHeading, tryNormalizeSectionHeading } from "../src/settings";
 import { validateCalendarPayload } from "../src/calendarPayload";
 import { fetchCalendarPayload } from "../src/calendarBridge";
 import { CALENDAR_EVENTS_SCRIPT } from "../src/calendarEventsSource";
@@ -194,6 +194,14 @@ describe("People links and settings", () => {
     expect(normalizePeopleFolder("/Other")).toBe("People");
     expect(normalizePeopleFolder("People//Team")).toBe("People");
     expect(normalizePeopleFolder("People/../Other")).toBe("People");
+  });
+
+  it("distinguishes valid completed headings from invalid input without a defaulting side effect", () => {
+    expect(tryNormalizeSectionHeading("  ###  Daily Notes  ")).toBe("### Daily Notes");
+    expect(normalizeSectionHeading("  ###  Daily Notes  ")).toBe("### Daily Notes");
+    expect(tryNormalizeSectionHeading("#")).toBeUndefined();
+    expect(tryNormalizeSectionHeading("Calendar")).toBeUndefined();
+    expect(normalizeSectionHeading("Calendar")).toBe("## Calendar");
   });
 });
 
