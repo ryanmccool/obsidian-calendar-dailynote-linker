@@ -1,0 +1,30 @@
+{
+  "name": "calendar-daily-note-linker",
+  "version": "0.1.0",
+  "description": "Populate an Obsidian Daily Note with Calendar.app events on macOS.",
+  "private": true,
+  "files": [
+    "main.js",
+    "manifest.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run typecheck && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs development",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "obsidian-daily-notes-interface": "^0.9.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "obsidian": "^1.13.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "peerDependencies": {
+    "obsidian": ">=1.5.0"
+  }
+}
