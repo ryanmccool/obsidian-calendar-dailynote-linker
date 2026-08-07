@@ -33,7 +33,7 @@ function validIsoDate(value: unknown, label: string): string {
   return date;
 }
 
-function validTargetDate(value: unknown): string {
+export function validateTargetDate(value: unknown): string {
   const targetDate = requiredString(value, "targetDate");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
     throw new CalendarPayloadValidationError("targetDate must be YYYY-MM-DD");
@@ -132,7 +132,7 @@ export function validateCalendarPayload(value: unknown): CalendarPayload {
   return {
     schemaVersion: 1,
     source: requiredString(value.source, "source"),
-    targetDate: validTargetDate(value.targetDate),
+    targetDate: validateTargetDate(value.targetDate),
     range: { start, end, timeZone },
     events: value.events.map((event, index) => parseEvent(event, index)),
     warnings: warnings.map((warning) => {

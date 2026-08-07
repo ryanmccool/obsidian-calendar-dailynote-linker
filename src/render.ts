@@ -1,4 +1,4 @@
-import { matchEventAttendees } from "./invitees";
+import { matchEventPeople } from "./invitees";
 import { makeCalendarBlock, sanitizePlainExternalText } from "./block";
 import type { PeopleIndex } from "./invitees";
 import type { CalendarEvent, CalendarPayload } from "./types";
@@ -47,28 +47,55 @@ export function formatLocalTime(isoDate: string, timeZone: string): string {
   }
 }
 
-function renderEvent(event: CalendarEvent, payload: CalendarPayload, people: PeopleIndex): string {
+interface RenderedEvent {
+  line: string;
+  linkCount: number;
+}
+
+function renderEvent(event: CalendarEvent, payload: CalendarPayload, people: PeopleIndex): RenderedEvent {
   const eventUrl = httpUrl(event.url);
   const title = eventUrl
     ? `[${sanitizePlainExternalText(event.title)}](${escapeMarkdownLinkUrl(eventUrl)})`
     : sanitizePlainExternalText(event.title);
-  const matchedPeople = matchEventAttendees(people, event.attendees);
+  const matchedPeople = matchEventPeople(people, event.attendees, event.title);
   const peopleLinks = matchedPeople
     .map((person) => person.markdownLink)
     .filter((link): link is string => Boolean(link));
   const when = event.allDay
     ? "All day"
     : `${formatLocalTime(event.start, payload.range.timeZone)}–${formatLocalTime(event.end, payload.range.timeZone)}`;
-  return `- ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""} — ${when}`;
+  return {
+    line: `- ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""} — ${when}`,
+    linkCount: peopleLinks.length
+  };
+}
+
+export interface CalendarRenderResult {
+  block: string;
+  eventCount: number;
+  linkCount: number;
+}
+
+export function renderCalendarBlockWithSummary(
+  payload: CalendarPayload,
+  heading: string,
+  people: PeopleIndex
+): CalendarRenderResult {
+  const lines = [heading];
+  const events = [...payload.events].sort(eventSort);
+  let linkCount = 0;
+  if (!events.length) {
+    lines.push(`No Calendar events found for ${payload.targetDate}.`);
+  } else {
+    for (const event of events) {
+      const rendered = renderEvent(event, payload, people);
+      lines.push(rendered.line);
+      linkCount += rendered.linkCount;
+    }
+  }
+  return { block: makeCalendarBlock(lines), eventCount: events.length, linkCount };
 }
 
 export function renderCalendarBlock(payload: CalendarPayload, heading: string, people: PeopleIndex): string {
-  const lines = [heading];
-  const events = [...payload.events].sort(eventSort);
-  if (!events.length) {
-    lines.push("No calendar events today.");
-  } else {
-    lines.push(...events.map((event) => renderEvent(event, payload, people)));
-  }
-  return makeCalendarBlock(lines);
+  return renderCalendarBlockWithSummary(payload, heading, people).block;
 }

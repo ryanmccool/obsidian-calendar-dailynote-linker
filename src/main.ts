@@ -1,128 +1,104 @@
-import { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from "obsidian";
-import {
-  createDailyNote,
-  getAllDailyNotes,
-  getDailyNote,
-  getDailyNoteSettings
-} from "obsidian-daily-notes-interface";
+import { Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { getDateFromFile, getDailyNoteSettings } from "obsidian-daily-notes-interface";
 import { fetchCalendarPayload, CalendarBridgeError } from "./calendarBridge";
 import { buildPeopleIndex, preparePeopleLinks, type PeopleMarkdownFile } from "./invitees";
 import { replaceCalendarBlock } from "./block";
-import { renderCalendarBlock } from "./render";
+import { renderCalendarBlockWithSummary } from "./render";
 import {
   DEFAULT_SETTINGS,
-  normalizePeopleFolder,
+  normalizeExcludedVaultFolders,
   normalizeSectionHeading,
+  parsePersistedExcludedVaultFolders,
+  tryNormalizeExcludedVaultFolders,
   tryNormalizeSectionHeading,
   type PluginSettings
 } from "./settings";
 import type { CalendarPayload } from "./types";
 import { assertCoreDailyNotes, DailyNotesModeError } from "./dailyNotesGuard";
-import { ensureDailyNotesFolder } from "./dailyNotesFolder";
+import { ActiveDailyNoteError, assertActiveDailyNoteUnchanged, resolveActiveDailyDate } from "./activeDailyNote";
+import { summarizeImportOutcome } from "./summary";
 
 export default class CalendarDailyNoteLinkerPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
+  excludedVaultFoldersPersistedInvalid = false;
+  excludedVaultFoldersInput: string | undefined;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addCommand({
-      id: "populate-todays-daily-note-with-calendar-events",
-      name: "Populate today's Daily Note with Calendar events",
+      id: "import-calendar-events-into-active-daily-note",
+      name: "Import Calendar events into active Daily Note",
       callback: () => {
-        void this.populateDailyNote();
+        void this.importIntoActiveDailyNote();
       }
     });
     this.addSettingTab(new CalendarDailyNoteLinkerSettingTab(this.app, this));
   }
 
   private async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) as Partial<PluginSettings> | null;
+    const saved = (await this.loadData()) as { excludedVaultFolders?: unknown; sectionHeading?: unknown } | null;
+    const persistedExcludedFolders = parsePersistedExcludedVaultFolders(saved?.excludedVaultFolders);
+    this.excludedVaultFoldersPersistedInvalid = persistedExcludedFolders.malformed;
+    this.excludedVaultFoldersInput = persistedExcludedFolders.rawInput;
     this.settings = {
-      peopleFolder: normalizePeopleFolder(saved?.peopleFolder),
+      // Older peopleFolder data is intentionally ignored: matching is vault-wide now.
+      excludedVaultFolders: persistedExcludedFolders.folders,
       sectionHeading: normalizeSectionHeading(saved?.sectionHeading)
     };
   }
 
   async saveSettings(): Promise<void> {
-    this.settings.peopleFolder = normalizePeopleFolder(this.settings.peopleFolder);
+    this.settings.excludedVaultFolders = normalizeExcludedVaultFolders(this.settings.excludedVaultFolders);
     this.settings.sectionHeading = normalizeSectionHeading(this.settings.sectionHeading);
-    await this.saveData(this.settings);
+    const data = this.excludedVaultFoldersPersistedInvalid
+      ? { ...this.settings, excludedVaultFolders: this.excludedVaultFoldersInput ?? "" }
+      : this.settings;
+    await this.saveData(data);
   }
 
-  private async populateDailyNote(): Promise<void> {
-    if (process.platform !== "darwin") {
-      new Notice("Calendar Daily Note Linker requires macOS desktop and Calendar.app.");
-      return;
-    }
-
-    let payload: CalendarPayload;
-    try {
-      // This deliberately happens before any Daily Note lookup or creation.
-      payload = await fetchCalendarPayload();
-    } catch (error) {
-      const message = error instanceof CalendarBridgeError
-        ? error.message
-        : `Calendar access failed: ${error instanceof Error ? error.message : String(error)}`;
-      new Notice(message, 10_000);
-      return;
-    }
-
-    for (const warning of payload.warnings) {
-      new Notice(`Calendar warning: ${warning}`, 8_000);
-    }
+  private async importIntoActiveDailyNote(): Promise<void> {
+    const progress = new Notice("Checking the active Daily Note…", 0);
+    const finish = (message: string): void => {
+      progress.setMessage(message);
+      window.setTimeout(() => progress.hide(), 10_000);
+    };
 
     try {
+      if (process.platform !== "darwin") {
+        throw new Error("Calendar Daily Note Linker requires macOS desktop and Calendar.app.");
+      }
       assertCoreDailyNotes(this.app);
-    } catch (error) {
-      new Notice(error instanceof DailyNotesModeError ? error.message : "Could not safely inspect Daily Notes. Enable the core Daily Notes plugin and try again.", 10_000);
-      return;
-    }
+      const activeFile = this.app.workspace.getActiveFile();
+      if (!activeFile || activeFile.extension.toLowerCase() !== "md") {
+        throw new ActiveDailyNoteError("Open an existing core Daily Note before running this command.");
+      }
 
-    let dailyNote: TFile | undefined;
-    try {
       assertCoreDailyNotes(this.app);
       const dailySettings = getDailyNoteSettings();
-      if (!dailySettings) {
-        throw new Error("Daily Notes settings are unavailable.");
-      }
-      const today = (window.moment as unknown as (date: string, format: string, strict: boolean) => import("moment").Moment)(
-        payload.targetDate,
-        "YYYY-MM-DD",
-        true
-      );
-      if (!today.isValid()) {
-        throw new Error(`Calendar target date is invalid: ${payload.targetDate}`);
-      }
-      await ensureDailyNotesFolder(this.app.vault, dailySettings.folder ?? "", (file) => file instanceof TFolder);
+      if (!dailySettings) throw new Error("Daily Notes settings are unavailable.");
       assertCoreDailyNotes(this.app);
-      let dailyNotes = getAllDailyNotes();
-      assertCoreDailyNotes(this.app);
-      dailyNote = getDailyNote(today, dailyNotes);
-      if (!dailyNote) {
-        assertCoreDailyNotes(this.app);
-        dailyNote = await createDailyNote(today);
-        assertCoreDailyNotes(this.app);
-        if (!dailyNote) {
-          assertCoreDailyNotes(this.app);
-          dailyNotes = getAllDailyNotes();
-          assertCoreDailyNotes(this.app);
-          dailyNote = getDailyNote(today, dailyNotes);
-        }
-      }
-    } catch (error) {
-      new Notice(
-        `Daily Notes could not resolve or create today's note. Check the core Daily Notes settings and enable Daily Notes. ${error instanceof Error ? error.message : String(error)}`,
-        10_000
+      const parseDateFromPath = (relativeStem: string, format: string) =>
+        (window.moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(relativeStem, format, true);
+      const createDateFromIso = (isoDate: string) =>
+        (window.moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(isoDate, "YYYY-MM-DD", true);
+      const targetDate = resolveActiveDailyDate(
+        activeFile,
+        dailySettings,
+        parseDateFromPath,
+        (file) => getDateFromFile(file as typeof activeFile, "day"),
+        createDateFromIso
       );
-      return;
-    }
+      if (this.excludedVaultFoldersPersistedInvalid) {
+        throw new Error("Saved vault folder exclusions are invalid. Correct them in settings before importing Calendar events.");
+      }
 
-    if (!dailyNote) {
-      new Notice("Daily Notes did not provide today's note. Check that Daily Notes is enabled and configured.", 10_000);
-      return;
-    }
+      progress.setMessage(`Reading Calendar for ${targetDate}…`);
+      const payload: CalendarPayload = await fetchCalendarPayload(targetDate);
+      if (payload.warnings.length) {
+        new Notice(`Calendar warning: ${payload.warnings.join(" ")}`, 8_000);
+      }
 
-    try {
+      progress.setMessage("Matching vault notes…");
       const peopleFiles: PeopleMarkdownFile[] = this.app.vault.getMarkdownFiles().map((file) => ({
         path: file.path,
         basename: file.basename,
@@ -130,29 +106,42 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
         frontmatter: this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined
       }));
       const people = preparePeopleLinks(
-        buildPeopleIndex(peopleFiles, this.settings.peopleFolder),
+        buildPeopleIndex(peopleFiles, this.settings.excludedVaultFolders),
         (target) => {
-          if (!target.file) throw new Error(`People note is unavailable: ${target.path}`);
-          return this.app.fileManager.generateMarkdownLink(
-            target.file,
-            dailyNote.path,
-            undefined,
-            target.basename || undefined
-          );
+          if (!target.file) throw new Error(`Vault note is unavailable: ${target.path}`);
+          return this.app.fileManager.generateMarkdownLink(target.file, activeFile.path, undefined, target.basename || undefined);
         }
       );
-      const block = renderCalendarBlock(payload, this.settings.sectionHeading, people);
-      assertCoreDailyNotes(this.app);
-      await this.app.vault.process(dailyNote, (content) => replaceCalendarBlock(content, block));
-    } catch (error) {
-      new Notice(
-        `Today's Daily Note could not be updated: ${error instanceof Error ? error.message : String(error)}`,
-        10_000
-      );
-      return;
-    }
+      const rendered = renderCalendarBlockWithSummary(payload, this.settings.sectionHeading, people);
 
-    new Notice("Today's Daily Note was updated with Calendar events.");
+      progress.setMessage("Writing the active Daily Note…");
+      assertCoreDailyNotes(this.app);
+      const currentFile = this.app.workspace.getActiveFile();
+      if (!currentFile || this.app.vault.getAbstractFileByPath(activeFile.path) !== activeFile) {
+        throw new ActiveDailyNoteError("The active Daily Note changed, moved, or was deleted; import aborted before writing.");
+      }
+      assertCoreDailyNotes(this.app);
+      const currentSettings = getDailyNoteSettings();
+      if (!currentSettings) throw new ActiveDailyNoteError("Core Daily Notes settings changed; import aborted before writing.");
+      assertCoreDailyNotes(this.app);
+      const currentDate = resolveActiveDailyDate(
+        currentFile,
+        currentSettings,
+        parseDateFromPath,
+        (file) => getDateFromFile(file as typeof activeFile, "day"),
+        createDateFromIso
+      );
+      assertActiveDailyNoteUnchanged(activeFile, currentFile, dailySettings, currentSettings, targetDate, currentDate);
+      await this.app.vault.process(activeFile, (content) => replaceCalendarBlock(content, rendered.block));
+      finish(summarizeImportOutcome(targetDate, activeFile.basename, rendered.eventCount, rendered.linkCount));
+    } catch (error) {
+      const message = error instanceof CalendarBridgeError
+        ? error.message
+        : error instanceof DailyNotesModeError || error instanceof ActiveDailyNoteError
+          ? error.message
+          : `Could not import Calendar events: ${error instanceof Error ? error.message : String(error)}`;
+      finish(message);
+    }
   }
 }
 
@@ -168,18 +157,21 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Calendar Daily Note Linker" });
+    if (this.plugin.excludedVaultFoldersPersistedInvalid) {
+      containerEl.createEl("p", { text: "Saved vault folder exclusions are invalid; correct them before importing Calendar events." });
+    }
 
     new Setting(containerEl)
-      .setName("People folder")
-      .setDesc("Vault-relative folder to search recursively for Markdown People notes.")
-      .addText((text) => text
-        .setPlaceholder(DEFAULT_SETTINGS.peopleFolder)
-        .setValue(this.plugin.settings.peopleFolder)
-        .onChange(async (value) => {
-          this.plugin.settings.peopleFolder = normalizePeopleFolder(value);
-          text.setValue(this.plugin.settings.peopleFolder);
-          await this.plugin.saveSettings();
-        }));
+      .setName("Vault folders to exclude")
+      .setDesc("Optional vault-relative folders to skip when matching Calendar attendees; one path per line; exclusions include subfolders; blank searches all Markdown notes.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Archive\nTemplates\nPrivate/People")
+          .setValue(this.plugin.excludedVaultFoldersInput ?? this.plugin.settings.excludedVaultFolders.join("\n"));
+        text.inputEl.addEventListener("blur", () => {
+          void this.commitExcludedVaultFolders(text);
+        });
+      });
 
     new Setting(containerEl)
       .setName("Section heading")
@@ -192,6 +184,10 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
           void this.commitSectionHeading(text);
         });
       });
+
+    containerEl.createEl("p", {
+      text: "Open an existing core Daily Note, then run the command; it updates that open note for its date."
+    });
   }
 
   private async commitSectionHeading(text: import("obsidian").TextComponent): Promise<void> {
@@ -211,6 +207,32 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
       this.plugin.settings.sectionHeading = previous;
       text.setValue(previous);
       new Notice(`Could not save the Section heading: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async commitExcludedVaultFolders(text: import("obsidian").TextAreaComponent): Promise<void> {
+    const previous = [...this.plugin.settings.excludedVaultFolders];
+    const previousInvalid = this.plugin.excludedVaultFoldersPersistedInvalid;
+    const previousInput = this.plugin.excludedVaultFoldersInput;
+    const normalized = tryNormalizeExcludedVaultFolders(text.getValue());
+    if (!normalized) {
+      if (!this.plugin.excludedVaultFoldersPersistedInvalid) text.setValue(previous.join("\n"));
+      new Notice("Use one safe vault-relative folder per line, or leave the field blank.");
+      return;
+    }
+
+    this.plugin.settings.excludedVaultFolders = normalized;
+    this.plugin.excludedVaultFoldersPersistedInvalid = false;
+    this.plugin.excludedVaultFoldersInput = undefined;
+    text.setValue(normalized.join("\n"));
+    try {
+      await this.plugin.saveSettings();
+    } catch (error) {
+      this.plugin.settings.excludedVaultFolders = previous;
+      this.plugin.excludedVaultFoldersPersistedInvalid = previousInvalid;
+      this.plugin.excludedVaultFoldersInput = previousInput;
+      text.setValue(previousInvalid ? previousInput ?? "" : previous.join("\n"));
+      new Notice(`Could not save excluded folders: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

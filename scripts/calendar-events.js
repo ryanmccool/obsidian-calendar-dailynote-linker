@@ -1,6 +1,6 @@
 /*
  * Fixed JXA bridge for Calendar.app.
- * The last expression returned by main() is the only stdout produced by this script.
+ * JXA invokes run(argv); its return value is the only stdout produced by this script.
  */
 
 function readEventProperty(object, propertyName) {
@@ -84,21 +84,20 @@ function readAttendees(event, warnings) {
   return attendees;
 }
 
-function calendarName(event) {
-  var calendar = readEventProperty(event, "calendar");
-  return calendar === null ? null : stringOrNull(readEventProperty(calendar, "title"));
-}
-
 function main() {
   var Calendar = Application("Calendar");
   var warnings = [];
-  var now = new Date();
-  function pad(number) {
-    return number < 10 ? "0" + number : String(number);
+  var targetDate = arguments.length === 1 ? String(arguments[0]) : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) throw new Error("Calendar target date must be YYYY-MM-DD.");
+  var dateParts = targetDate.split("-").map(Number);
+  var year = dateParts[0];
+  var month = dateParts[1];
+  var day = dateParts[2];
+  var rangeStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+  if (rangeStart.getFullYear() !== year || rangeStart.getMonth() !== month - 1 || rangeStart.getDate() !== day) {
+    throw new Error("Calendar target date must be a valid local date.");
   }
-  var targetDate = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
-  var rangeStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  var rangeEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  var rangeEnd = new Date(year, month - 1, day + 1, 0, 0, 0, 0);
   var timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
   var events = [];
 
@@ -106,6 +105,7 @@ function main() {
   if (!Array.isArray(calendars)) throw new Error("Calendar calendars could not be enumerated.");
   for (var calendarIndex = 0; calendarIndex < calendars.length; calendarIndex += 1) {
     var calendar = calendars[calendarIndex];
+    var calendarName = stringOrNull(readEventProperty(calendar, "name"));
     var calendarEvents;
     try {
       calendarEvents = calendar.events.whose({
@@ -130,7 +130,7 @@ function main() {
       if (typeof allDay !== "boolean") throw new Error("Calendar event all-day value was not boolean.");
       events.push({
         id: stringOrNull(readEventProperty(event, "uid")),
-        calendar: calendarName(event),
+        calendar: calendarName,
         title: stringOrNull(readEventProperty(event, "summary")) || "(Untitled event)",
         start: start.toISOString(),
         end: end.toISOString(),
@@ -157,4 +157,7 @@ function main() {
   });
 }
 
-main();
+function run(argv) {
+  if (!argv || argv.length !== 1) throw new Error("Calendar target date argument is required.");
+  return main.apply(null, argv);
+}

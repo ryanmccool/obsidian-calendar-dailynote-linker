@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parseCalendarPayloadJson } from "./calendarPayload";
 import { CALENDAR_EVENTS_SCRIPT } from "./calendarEventsSource";
+import { validateTargetDate } from "./calendarPayload";
 import type { CalendarPayload } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -28,10 +29,15 @@ export class CalendarBridgeError extends Error {
   }
 }
 
-export async function fetchCalendarPayload(run: CalendarCommandRunner = defaultRunner): Promise<CalendarPayload> {
+export async function fetchCalendarPayload(targetDate: string, run: CalendarCommandRunner = defaultRunner): Promise<CalendarPayload> {
+  try {
+    validateTargetDate(targetDate);
+  } catch (error) {
+    throw new CalendarBridgeError(error instanceof Error ? error.message : "Calendar target date must be YYYY-MM-DD.");
+  }
   let result: { stdout: string; stderr: string };
   try {
-    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT], {
+    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, targetDate], {
       encoding: "utf8",
       timeout: 30_000,
       maxBuffer: 2 * 1024 * 1024,
@@ -53,7 +59,11 @@ export async function fetchCalendarPayload(run: CalendarCommandRunner = defaultR
     );
   }
   try {
-    return parseCalendarPayloadJson(output);
+    const payload = parseCalendarPayloadJson(output);
+    if (payload.targetDate !== targetDate) {
+      throw new Error(`Calendar bridge returned ${payload.targetDate} instead of ${targetDate}.`);
+    }
+    return payload;
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     throw new CalendarBridgeError(`Calendar bridge returned malformed data: ${details}`);

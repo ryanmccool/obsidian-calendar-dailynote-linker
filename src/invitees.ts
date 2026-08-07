@@ -55,15 +55,21 @@ function targetFor(file: PeopleMarkdownFile): PersonLinkTarget {
   return { path, basename, file: file.file };
 }
 
-export function buildPeopleIndex(files: readonly PeopleMarkdownFile[], peopleFolder: string): PeopleIndex {
+function isExcludedPath(path: string, excludedFolders: readonly string[]): boolean {
+  const normalizedPath = path.replaceAll("\\", "/");
+  return excludedFolders.some((folder) => {
+    const normalizedFolder = folder.replaceAll("\\", "/").replace(/\/+$/u, "");
+    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
+  });
+}
+
+export function buildPeopleIndex(files: readonly PeopleMarkdownFile[], excludedFolders: readonly string[]): PeopleIndex {
   const byEmail = new Map<string, PersonLinkTarget[]>();
   const byName = new Map<string, PersonLinkTarget[]>();
-  const normalizedFolder = peopleFolder.replaceAll("\\", "/").replace(/\/+$/u, "");
-  const prefix = `${normalizedFolder}/`;
 
   for (const file of files) {
     const path = file.path.replaceAll("\\", "/");
-    if (!path.startsWith(prefix) || !path.toLowerCase().endsWith(".md")) continue;
+    if (!path.toLowerCase().endsWith(".md") || isExcludedPath(path, excludedFolders)) continue;
     const target = targetFor(file);
     addKey(byName, normalizeName(target.basename), target);
     for (const alias of frontmatterStrings(file.frontmatter, "aliases")) {
@@ -99,6 +105,18 @@ export function matchEventAttendees(index: PeopleIndex, attendees: readonly Atte
     }
   }
   return matches;
+}
+
+export function matchEventPeople(
+  index: PeopleIndex,
+  attendees: readonly AttendeeIdentity[],
+  eventTitle: string
+): PersonLinkTarget[] {
+  const attendeeMatches = matchEventAttendees(index, attendees);
+  if (attendeeMatches.length > 0) return attendeeMatches;
+
+  const titleMatches = index.byName.get(normalizeName(eventTitle));
+  return titleMatches?.length === 1 ? [titleMatches[0]] : [];
 }
 
 export function preparePeopleLinks(
