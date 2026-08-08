@@ -165,7 +165,8 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
           buildPeopleIndex(peopleFiles, this.settings.excludedVaultFolders),
           (target) => {
             if (!target.file) throw new Error(`Vault note is unavailable: ${target.path}`);
-            return this.app.fileManager.generateMarkdownLink(target.file, activeFile.path, undefined, target.basename || undefined);
+            const linkText = this.app.metadataCache.fileToLinktext(target.file, activeFile.path, true);
+            return { linkText };
           }
         );
       });
@@ -284,7 +285,7 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Link matching vault notes")
-      .setDesc("Add deterministic links for uniquely matching attendees or event titles.")
+      .setDesc("Add deterministic vault links for uniquely matched attendee names that appear in event titles.")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.linkMatchingVaultNotes)
           .onChange((value) => { void this.commitBoolean(toggle, "linkMatchingVaultNotes", value); });
@@ -292,7 +293,7 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Link event titles to Calendar")
-      .setDesc("Use a Calendar event URL as a Markdown link on the event title when available.")
+      .setDesc("Link event titles to Calendar when available; with an in-title vault link, add a separate Calendar link on the same line.")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.linkEventTitles)
           .onChange((value) => { void this.commitBoolean(toggle, "linkEventTitles", value); });

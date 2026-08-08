@@ -1,6 +1,6 @@
 {
   "name": "calendar-daily-note-linker",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Populate an Obsidian Daily Note with macOS Calendar events.",
   "private": true,
   "files": [

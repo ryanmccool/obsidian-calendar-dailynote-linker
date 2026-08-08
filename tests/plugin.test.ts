@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { replaceCalendarBlock } from "../src/block";
-import { buildPeopleIndex, matchAttendee, matchEventPeople, preparePeopleIndexForImport, preparePeopleLinks } from "../src/invitees";
+import { buildPeopleIndex, matchAttendee, preparePeopleIndexForImport, preparePeopleLinks } from "../src/invitees";
 import { renderCalendarBlock, renderCalendarBlockWithSummary } from "../src/render";
 import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, parsePersistedPluginSettings, tryNormalizeExcludedVaultFolders, tryNormalizeInsertionHeading, tryNormalizeSectionHeading } from "../src/settings";
 import { calculateCursorInsertionOffset, insertCalendarBlockBelowHeading, relocateCalendarBlockAtCursor } from "../src/insertion";
@@ -51,6 +51,14 @@ function payload(events: CalendarEvent[]): CalendarPayload {
     events,
     warnings: []
   };
+}
+
+function preparedPeople(index: ReturnType<typeof buildPeopleIndex>, omitMdExtension = false) {
+  return preparePeopleLinks(index, (target) => ({
+    linkText: omitMdExtension && target.path.toLowerCase().endsWith(".md")
+      ? target.path.slice(0, -3)
+      : target.path
+  }));
 }
 
 describe("People matching", () => {
@@ -140,20 +148,21 @@ describe("Calendar rendering", () => {
     expect(rendered.block).toContain("## Company holiday\nAll day");
   });
 
-  it("honors matching-note and event-title link toggles", () => {
-    const people = preparePeopleLinks(buildPeopleIndex([
+  it("keeps attendee wikilinks separate from Calendar URLs and honors link toggles", () => {
+    const people = preparedPeople(buildPeopleIndex([
       { path: "People/Mike.md", basename: "Mike", frontmatter: {} }
-    ], []), (target) => `[[${target.path}|${target.basename}]]`);
+    ], []));
     const linked = renderCalendarBlockWithSummary(payload([event({
       title: "Mike",
-      url: "https://example.com/event",
+      url: "https://example.com/a_(b)?q=1",
       attendees: [{ displayName: "Mike", email: null, status: "unknown" }]
     })]), people);
-    expect(linked.block).toContain("## [Mike](https://example.com/event) — [[People/Mike.md|Mike]]");
+    expect(linked.block).toContain("## [[People/Mike.md|Mike]] · [Calendar](https://example.com/a_\\(b\\)?q=1)");
+    expect(linked.block).not.toContain("[[[");
 
     const unlinked = renderCalendarBlockWithSummary(payload([event({
       title: "Mike",
-      url: "https://example.com/event",
+      url: "https://example.com/a_(b)?q=1",
       attendees: [{ displayName: "Mike", email: null, status: "unknown" }]
     })]), people, {
       eventHeadingLevel: 2,
@@ -163,7 +172,8 @@ describe("Calendar rendering", () => {
     });
     expect(unlinked.block).toContain("## Mike\n");
     expect(unlinked.block).not.toContain("People/Mike");
-    expect(unlinked.block).not.toContain("https://example.com/event");
+    expect(unlinked.block).not.toContain("https://example.com/a_");
+    expect(unlinked.block).not.toContain("[Calendar]");
 
     const matchingDisabled = renderCalendarBlockWithSummary(payload([event({
       title: "Mike",
@@ -173,6 +183,220 @@ describe("Calendar rendering", () => {
       linkEventTitles: true
     });
     expect(matchingDisabled.block).toContain("## [Mike](https://example.com/event)");
+  });
+
+  it("links a short attendee-name component in the title", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy - Ryan chat",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain("## [[People/Randy Swensen|Randy]] - Ryan chat\n09:00 – 10:00");
+    expect(rendered.linkCount).toBe(1);
+  });
+
+  it("links a full attendee name and preserves its original spacing", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "Meet randy   swensen",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain("## Meet [[People/Randy Swensen|randy   swensen]]\n09:00 – 10:00");
+  });
+
+  it("keeps UTF-16 title coordinates correct around emoji and canonical accents", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} },
+      { path: "People/José.md", basename: "José", frontmatter: {} }
+    ], []), true);
+    const emoji = renderCalendarBlockWithSummary(payload([event({
+      title: "🧑‍💻 Randy sync",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), people);
+    const decomposedJose = "Jose\u0301";
+    const accent = renderCalendarBlockWithSummary(payload([event({
+      title: `Meet ${decomposedJose}`,
+      attendees: [{ displayName: "José", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(emoji.block).toContain("## 🧑‍💻 [[People/Randy Swensen|Randy]] sync\n09:00 – 10:00");
+    expect(accent.block).toContain(`## Meet [[People/José|${decomposedJose}]]\n09:00 – 10:00`);
+  });
+
+  it("preserves the complete original grapheme when combining marks reorder", () => {
+    const targetName = "A\u0323\u0301da";
+    const titleName = "A\u0301\u0323da";
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Accent.md", basename: targetName, frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: `Meet ${titleName}`,
+      attendees: [{ displayName: targetName, email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain(`## Meet [[People/Accent|${titleName}]]\n09:00 – 10:00`);
+  });
+
+  it("folds uppercase Greek final sigma consistently across attendee and title matching", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Greek.md", basename: "ΟΣ", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "ΟΣ sync",
+      attendees: [{ displayName: "ΟΣ", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain("## [[People/Greek|ΟΣ]] sync\n09:00 – 10:00");
+  });
+
+  it("treats supplementary-plane letters and combining marks as name characters at boundaries", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "𐐀Randy e\u0301Randy",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain("## 𐐀Randy e\u0301Randy\n09:00 – 10:00");
+    expect(rendered.linkCount).toBe(0);
+  });
+
+  it("links multiple matched attendees at their non-overlapping title occurrences", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} },
+      { path: "People/Ryan Chen.md", basename: "Ryan Chen", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy and Ryan planning",
+      attendees: [
+        { displayName: "Randy Swensen", email: null, status: "unknown" },
+        { displayName: "Ryan Chen", email: null, status: "unknown" }
+      ]
+    })]), people);
+
+    expect(rendered.block).toContain("## [[People/Randy Swensen|Randy]] and [[People/Ryan Chen|Ryan]] planning\n09:00 – 10:00");
+    expect(rendered.linkCount).toBe(2);
+  });
+
+  it("drops a shared first-name short form while retaining unambiguous full names", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy One.md", basename: "Randy One", frontmatter: {} },
+      { path: "People/Randy Two.md", basename: "Randy Two", frontmatter: {} }
+    ], []), true);
+    const short = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy sync",
+      attendees: [
+        { displayName: "Randy One", email: null, status: "unknown" },
+        { displayName: "Randy Two", email: null, status: "unknown" }
+      ]
+    })]), people);
+    const full = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy One and Randy Two sync",
+      attendees: [
+        { displayName: "Randy One", email: null, status: "unknown" },
+        { displayName: "Randy Two", email: null, status: "unknown" }
+      ]
+    })]), people);
+
+    expect(short.block).toContain("## Randy sync\n09:00 – 10:00");
+    expect(short.block).not.toContain("People/");
+    expect(full.block).toContain("[[People/Randy One|Randy One]] and [[People/Randy Two|Randy Two]]");
+  });
+
+  it("does not derive short links from surnames, punctuation, or stopwords", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy, Swensen.md", basename: "Randy, Swensen", frontmatter: {} },
+      { path: "People/The Team.md", basename: "The Team", frontmatter: {} }
+    ], []), true);
+    const surname = renderCalendarBlockWithSummary(payload([event({
+      title: "Swensen planning",
+      attendees: [{ displayName: "Randy, Swensen", email: null, status: "unknown" }]
+    })]), people);
+    const stopword = renderCalendarBlockWithSummary(payload([event({
+      title: "The planning",
+      attendees: [{ displayName: "The Team", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(surname.block).toContain("## Swensen planning\n09:00 – 10:00");
+    expect(stopword.block).toContain("## The planning\n09:00 – 10:00");
+    expect(surname.block).not.toContain("People/");
+    expect(stopword.block).not.toContain("People/");
+  });
+
+  it("keeps internal apostrophes and hyphens in short names but rejects numeric and Last, First fragments", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/O'Neil Smith.md", basename: "O'Neil Smith", frontmatter: {} },
+      { path: "People/Mary-Jane Watson.md", basename: "Mary-Jane Watson", frontmatter: {} },
+      { path: "People/123 Team.md", basename: "123 Team", frontmatter: {} },
+      { path: "People/Swensen, Randy.md", basename: "Swensen, Randy", frontmatter: {} }
+    ], []), true);
+    const apostrophe = renderCalendarBlockWithSummary(payload([event({
+      title: "O'Neil sync",
+      attendees: [{ displayName: "O'Neil Smith", email: null, status: "unknown" }]
+    })]), people);
+    const hyphen = renderCalendarBlockWithSummary(payload([event({
+      title: "Mary-Jane sync",
+      attendees: [{ displayName: "Mary-Jane Watson", email: null, status: "unknown" }]
+    })]), people);
+    const numeric = renderCalendarBlockWithSummary(payload([event({
+      title: "123 sync",
+      attendees: [{ displayName: "123 Team", email: null, status: "unknown" }]
+    })]), people);
+    const lastFirst = renderCalendarBlockWithSummary(payload([event({
+      title: "Swensen sync",
+      attendees: [{ displayName: "Swensen, Randy", email: null, status: "unknown" }]
+    })]), people);
+    const lastFirstFull = renderCalendarBlockWithSummary(payload([event({
+      title: "Swensen, Randy sync",
+      attendees: [{ displayName: "Swensen, Randy", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(apostrophe.block).toContain("[[People/O'Neil Smith|O'Neil]]");
+    expect(hyphen.block).toContain("[[People/Mary-Jane Watson|Mary-Jane]]");
+    expect(numeric.block).not.toContain("People/");
+    expect(lastFirst.block).not.toContain("People/");
+    expect(lastFirstFull.block).toContain("[[People/Swensen, Randy|Swensen, Randy]]");
+  });
+
+  it("does not append a person link when the matched attendee is absent from the title", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} }
+    ], []), true);
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "Project planning",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), people);
+
+    expect(rendered.block).toContain("## Project planning\n09:00 – 10:00");
+    expect(rendered.block).not.toContain("People/Randy");
+    expect(rendered.linkCount).toBe(0);
+  });
+
+  it("leaves ambiguous and unmatched attendee names plain", () => {
+    const ambiguousPeople = preparedPeople(buildPeopleIndex([
+      { path: "One/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} },
+      { path: "Two/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} }
+    ], []), true);
+    const ambiguous = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy - Ryan chat",
+      attendees: [{ displayName: "Randy Swensen", email: null, status: "unknown" }]
+    })]), ambiguousPeople);
+    const unmatched = renderCalendarBlockWithSummary(payload([event({
+      title: "Randy - Ryan chat",
+      attendees: [{ displayName: "Unknown Person", email: null, status: "unknown" }]
+    })]), buildPeopleIndex([], []));
+
+    expect(ambiguous.block).toContain("## Randy - Ryan chat\n09:00 – 10:00");
+    expect(unmatched.block).toContain("## Randy - Ryan chat\n09:00 – 10:00");
+    expect(ambiguous.block).not.toContain("People/");
+    expect(unmatched.block).not.toContain("People/");
   });
 
   it("uses the target date rather than today in an empty historical block", () => {
@@ -242,27 +466,25 @@ describe("Calendar rendering", () => {
     expect(invalid).not.toContain("[No link](");
   });
 
-  it("uses a unique title fallback only when attendees produced no links", () => {
-    const index = preparePeopleLinks(buildPeopleIndex([
+  it("does not use a title-only vault match as a rendering fallback", () => {
+    const index = preparedPeople(buildPeopleIndex([
       { path: "Projects/Project.md", basename: "Project", frontmatter: {} },
       { path: "People/Ada.md", basename: "Ada", frontmatter: { aliases: ["Ada Lovelace"] } }
-    ], []), (target) => `[[${target.path}|${target.basename}]]`);
+    ], []));
     const titleFallback = renderCalendarBlock(payload([event({ title: "Project" })]), "## Calendar", index);
-    expect(titleFallback).toContain("[[Projects/Project.md|Project]]");
+    const modernTitleOnly = renderCalendarBlockWithSummary(payload([event({ title: "Project" })]), index);
+    expect(titleFallback).toContain("Project\n9:00 AM–10:00 AM");
+    expect(titleFallback).not.toContain("Projects/Project");
+    expect(modernTitleOnly.block).toContain("## Project\n09:00 – 10:00");
+    expect(modernTitleOnly.block).not.toContain("Projects/Project");
 
     const attendeeWins = renderCalendarBlock(payload([event({
       title: "Project",
       attendees: [{ displayName: "Ada Lovelace", email: null, status: "unknown" }]
     })]), "## Calendar", index);
-    expect(attendeeWins).toContain("Project — [[People/Ada.md|Ada]]\n9:00 AM–10:00 AM");
-    expect(attendeeWins).not.toContain("\n[[People/Ada.md|Ada]]\n");
+    expect(attendeeWins).toContain("Project\n9:00 AM–10:00 AM");
+    expect(attendeeWins).not.toContain("People/Ada");
     expect(attendeeWins).not.toContain("[[Projects/Project.md|Project]]");
-
-    const ambiguous = buildPeopleIndex([
-      { path: "One/Project.md", basename: "Project", frontmatter: {} },
-      { path: "Two/Project.md", basename: "Project", frontmatter: {} }
-    ], []);
-    expect(matchEventPeople(ambiguous, [], "Project")).toEqual([]);
   });
 });
 
@@ -367,20 +589,39 @@ describe("managed block replacement", () => {
 });
 
 describe("People links and settings", () => {
-  it("preserves special file paths while using prepared generated links", () => {
+  it("preserves special file paths and display aliases in prepared links", () => {
     const index = buildPeopleIndex([{
       path: "People/Team [A]/Ada | Lovelace.md",
       basename: "Ada | Lovelace",
       file: {} as never,
       frontmatter: { aliases: ["The Enchantress"] }
     }], []);
-    const linked = preparePeopleLinks(index, (target) => `[[${target.path.replaceAll("|", "\\|")}|${target.basename.replaceAll("|", "\\|")}]]`);
+    const linked = preparedPeople(index);
     const rendered = renderCalendarBlock(payload([event({
       title: "Meet Ada",
       attendees: [{ displayName: "The Enchantress", email: null, status: "unknown" }]
     })]), "## Calendar", linked);
+    const displayRendered = renderCalendarBlock(payload([event({
+      title: "Meet Ada | Lovelace",
+      attendees: [{ displayName: "Ada | Lovelace", email: null, status: "unknown" }]
+    })]), "## Calendar", linked);
 
-    expect(rendered).toContain("[[People/Team [A]/Ada \\| Lovelace.md|Ada \\| Lovelace]]");
+    expect(rendered).toContain("[[People/Team [A\\]/Ada \\| Lovelace.md|Ada]]");
+    expect(displayRendered).toContain("[[People/Team [A\\]/Ada \\| Lovelace.md|Ada \\| Lovelace]]");
+  });
+
+  it("prepares explicit Obsidian link destinations without parsing generated Markdown", () => {
+    const index = buildPeopleIndex([
+      { path: "People/Ada.md", basename: "Ada", frontmatter: {} }
+    ], []);
+    const prepared = preparePeopleLinks(index, () => ({ linkText: "People/Ada" }));
+    const rendered = renderCalendarBlockWithSummary(payload([event({
+      title: "Meet Ada",
+      attendees: [{ displayName: "Ada", email: null, status: "unknown" }]
+    })]), prepared);
+
+    expect(rendered.block).toContain("## Meet [[People/Ada|Ada]]");
+    expect(() => preparePeopleLinks(index, () => ({ linkText: "People/Ada\n" }))).toThrow(/unsafe/);
   });
 
   it("normalizes exclusions and rejects unsafe paths", () => {
@@ -734,11 +975,11 @@ describe("active Daily Note resolution and outcome summaries", () => {
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 0, 0))
       .toBe("No Calendar events found for 2025-01-14. The active Daily Note was updated.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 2, 0))
-      .toBe("Imported 2 Calendar events into 2025-01-14. No attendees or event titles uniquely matched vault notes.");
+      .toBe("Imported 2 Calendar events into 2025-01-14. No uniquely matched attendee names appeared in event titles.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 2, 3))
-      .toBe("Imported 2 Calendar events into 2025-01-14 and added 3 vault links.");
+      .toBe("Imported 2 Calendar events into 2025-01-14 and added 3 vault links for attendee names present in event titles.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 1, 1))
-      .toBe("Imported 1 Calendar event into 2025-01-14 and added 1 vault link.");
+      .toBe("Imported 1 Calendar event into 2025-01-14 and added 1 vault link for attendee names present in event titles.");
   });
 
   it("describes the configured destination, formatting, links, and relocation", () => {
@@ -749,7 +990,7 @@ describe("active Daily Note resolution and outcome summaries", () => {
       timeFormat: "24-hour",
       linkMatchingVaultNotes: true,
       linkEventTitles: true
-    })).toContain("below # Notes; Heading 2, 24-hour, matching vault notes on, event title links on; managed block relocated");
+    })).toContain("below # Notes; Heading 2, 24-hour, attendee-name links on (title names only), Calendar URL links on (separate when needed); managed block relocated");
   });
 
   it("rejects active-file identity, path, date, and configuration changes", () => {

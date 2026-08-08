@@ -11,7 +11,12 @@ export interface PersonLinkTarget {
   path: string;
   basename: string;
   file?: TFile;
-  markdownLink?: string;
+  /** Validated Obsidian link destination returned by metadataCache.fileToLinktext. */
+  linkText?: string;
+}
+
+export interface PreparedPersonLink {
+  linkText: string;
 }
 
 export interface PeopleIndex {
@@ -45,12 +50,16 @@ function addKey(map: Map<string, PersonLinkTarget[]>, key: string, target: Perso
   map.set(key, current);
 }
 
+export function normalizeCaseFold(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replaceAll("ς", "σ");
+}
+
 export function normalizeName(value: string): string {
-  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+  return normalizeCaseFold(value).trim().replace(/\s+/gu, " ");
 }
 
 export function normalizeEmail(value: string): string {
-  return value.normalize("NFKC").trim().replace(/\s+/gu, "").toLowerCase();
+  return normalizeCaseFold(value).trim().replace(/\s+/gu, "");
 }
 
 function frontmatterStrings(frontmatter: Record<string, unknown> | undefined, key: string): string[] {
@@ -107,41 +116,32 @@ export function matchAttendee(index: PeopleIndex, attendee: AttendeeIdentity): P
   return nameMatches?.length === 1 ? nameMatches[0] : null;
 }
 
-export function matchEventAttendees(index: PeopleIndex, attendees: readonly AttendeeIdentity[]): PersonLinkTarget[] {
-  const matches: PersonLinkTarget[] = [];
-  for (const attendee of attendees) {
-    const match = matchAttendee(index, attendee);
-    if (match && !matches.some((candidate) => candidate.path === match.path)) {
-      matches.push(match);
-    }
-  }
-  return matches;
-}
-
-export function matchEventPeople(
-  index: PeopleIndex,
-  attendees: readonly AttendeeIdentity[],
-  eventTitle: string
-): PersonLinkTarget[] {
-  const attendeeMatches = matchEventAttendees(index, attendees);
-  if (attendeeMatches.length > 0) return attendeeMatches;
-
-  const titleMatches = index.byName.get(normalizeName(eventTitle));
-  return titleMatches?.length === 1 ? [titleMatches[0]] : [];
-}
-
 export function preparePeopleLinks(
   index: PeopleIndex,
-  generateMarkdownLink: (target: PersonLinkTarget) => string
+  prepareLink: (target: PersonLinkTarget) => PreparedPersonLink
 ): PeopleIndex {
-  const generated = new Map<string, string>();
-  const prepare = (targets: PersonLinkTarget[]): PersonLinkTarget[] => targets.map((target) => {
-    let markdownLink = generated.get(target.path);
-    if (markdownLink === undefined) {
-      markdownLink = generateMarkdownLink(target);
-      generated.set(target.path, markdownLink);
+  const prepared = new Map<string, PreparedPersonLink>();
+  const validate = (target: PersonLinkTarget, link: PreparedPersonLink): PreparedPersonLink => {
+    if (!link || typeof link.linkText !== "string") {
+      throw new Error(`Vault note link data is invalid for ${target.path}.`);
     }
-    return { ...target, markdownLink };
+    if (
+      !link.linkText.trim() ||
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(link.linkText) ||
+      link.linkText.includes("<!-- calendar-daily-note-linker:start -->") ||
+      link.linkText.includes("<!-- calendar-daily-note-linker:end -->")
+    ) {
+      throw new Error(`Vault note link data is unsafe for ${target.path}.`);
+    }
+    return { linkText: link.linkText };
+  };
+  const prepare = (targets: PersonLinkTarget[]): PersonLinkTarget[] => targets.map((target) => {
+    let link = prepared.get(target.path);
+    if (link === undefined) {
+      link = validate(target, prepareLink(target));
+      prepared.set(target.path, link);
+    }
+    return { ...target, ...link };
   });
   return {
     byEmail: new Map([...index.byEmail].map(([key, targets]) => [key, prepare(targets)])),
