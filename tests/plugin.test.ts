@@ -189,8 +189,8 @@ describe("Calendar rendering", () => {
     ]), "## Calendar", people);
 
     expect(rendered.indexOf("All day")).toBeLessThan(rendered.indexOf("Timed early"));
-    expect(rendered).toContain("Timed early — 8:00 AM–9:00 AM");
-    expect(rendered).toContain("Timed late — 11:00 AM–12:30 PM");
+    expect(rendered).toContain("Timed early\n8:00 AM–9:00 AM");
+    expect(rendered).toContain("Timed late\n11:00 AM–12:30 PM");
   });
 
   it("escapes a URL while retaining it as the title link", () => {
@@ -238,7 +238,7 @@ describe("Calendar rendering", () => {
     expect(safe).not.toContain("](javascript:");
 
     const invalid = renderCalendarBlock(payload([event({ title: "No link", url: "javascript:alert(1)" })]), "## Calendar", buildPeopleIndex([], []));
-    expect(invalid).toContain("- No link —");
+    expect(invalid).toContain("No link\n9:00 AM–10:00 AM");
     expect(invalid).not.toContain("[No link](");
   });
 
@@ -254,7 +254,8 @@ describe("Calendar rendering", () => {
       title: "Project",
       attendees: [{ displayName: "Ada Lovelace", email: null, status: "unknown" }]
     })]), "## Calendar", index);
-    expect(attendeeWins).toContain("[[People/Ada.md|Ada]]");
+    expect(attendeeWins).toContain("Project — [[People/Ada.md|Ada]]\n9:00 AM–10:00 AM");
+    expect(attendeeWins).not.toContain("\n[[People/Ada.md|Ada]]\n");
     expect(attendeeWins).not.toContain("[[Projects/Project.md|Project]]");
 
     const ambiguous = buildPeopleIndex([

@@ -152,7 +152,8 @@ function renderLegacyCalendarBlock(
       const when = event.allDay
         ? "All day"
         : `${formatLocalTime(event.start, payload.range.timeZone, "12-hour")}–${formatLocalTime(event.end, payload.range.timeZone, "12-hour")}`;
-      lines.push(`- ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""} — ${when}`);
+      lines.push(`${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""}`);
+      lines.push(when);
       linkCount += peopleLinks.length;
     }
   }
