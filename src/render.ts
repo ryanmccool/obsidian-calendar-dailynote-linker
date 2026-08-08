@@ -2,6 +2,21 @@ import { matchEventPeople } from "./invitees";
 import { makeCalendarBlock, sanitizePlainExternalText } from "./block";
 import type { PeopleIndex } from "./invitees";
 import type { CalendarEvent, CalendarPayload } from "./types";
+import type { EventHeadingLevel, TimeFormat } from "./settings";
+
+export interface CalendarRenderOptions {
+  eventHeadingLevel: EventHeadingLevel;
+  timeFormat: TimeFormat;
+  linkMatchingVaultNotes: boolean;
+  linkEventTitles: boolean;
+}
+
+export const DEFAULT_RENDER_OPTIONS: CalendarRenderOptions = {
+  eventHeadingLevel: 2,
+  timeFormat: "24-hour",
+  linkMatchingVaultNotes: true,
+  linkEventTitles: true
+};
 
 export function escapeMarkdownLinkUrl(value: string): string {
   return value
@@ -33,12 +48,17 @@ function eventSort(left: CalendarEvent, right: CalendarEvent): number {
   return left.title.localeCompare(right.title);
 }
 
-export function formatLocalTime(isoDate: string, timeZone: string): string {
+export function formatLocalTime(
+  isoDate: string,
+  timeZone: string,
+  timeFormat: TimeFormat = "24-hour"
+): string {
   const options: Intl.DateTimeFormatOptions = {
     timeZone,
     hour: "numeric",
     minute: "2-digit",
-    hour12: true
+    hour12: timeFormat === "12-hour",
+    ...(timeFormat === "24-hour" ? { hourCycle: "h23" } : {})
   };
   try {
     return new Intl.DateTimeFormat("en-US", options).format(new Date(isoDate));
@@ -48,26 +68,38 @@ export function formatLocalTime(isoDate: string, timeZone: string): string {
 }
 
 interface RenderedEvent {
-  line: string;
+  lines: [string, string];
   linkCount: number;
 }
 
-function renderEvent(event: CalendarEvent, payload: CalendarPayload, people: PeopleIndex): RenderedEvent {
-  const eventUrl = httpUrl(event.url);
+function sanitizeEventHeadingTitle(value: string): string {
+  // A hyphen is ordinary heading text (and is part of common event names), so
+  // keep it readable while retaining the stricter escaping for other syntax.
+  return sanitizePlainExternalText(value).replaceAll("\\-", "-");
+}
+
+function renderEvent(
+  event: CalendarEvent,
+  payload: CalendarPayload,
+  people: PeopleIndex,
+  options: CalendarRenderOptions
+): RenderedEvent {
+  const eventUrl = options.linkEventTitles ? httpUrl(event.url) : null;
+  const plainTitle = sanitizeEventHeadingTitle(event.title);
   const title = eventUrl
-    ? `[${sanitizePlainExternalText(event.title)}](${escapeMarkdownLinkUrl(eventUrl)})`
-    : sanitizePlainExternalText(event.title);
-  const matchedPeople = matchEventPeople(people, event.attendees, event.title);
+    ? `[${plainTitle}](${escapeMarkdownLinkUrl(eventUrl)})`
+    : plainTitle;
+  const matchedPeople = options.linkMatchingVaultNotes
+    ? matchEventPeople(people, event.attendees, event.title)
+    : [];
   const peopleLinks = matchedPeople
     .map((person) => person.markdownLink)
     .filter((link): link is string => Boolean(link));
+  const heading = `${"#".repeat(options.eventHeadingLevel)} ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""}`;
   const when = event.allDay
     ? "All day"
-    : `${formatLocalTime(event.start, payload.range.timeZone)}–${formatLocalTime(event.end, payload.range.timeZone)}`;
-  return {
-    line: `- ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""} — ${when}`,
-    linkCount: peopleLinks.length
-  };
+    : `${formatLocalTime(event.start, payload.range.timeZone, options.timeFormat)} – ${formatLocalTime(event.end, payload.range.timeZone, options.timeFormat)}`;
+  return { lines: [heading, when], linkCount: peopleLinks.length };
 }
 
 export interface CalendarRenderResult {
@@ -76,7 +108,29 @@ export interface CalendarRenderResult {
   linkCount: number;
 }
 
-export function renderCalendarBlockWithSummary(
+function renderModernCalendarBlock(
+  payload: CalendarPayload,
+  people: PeopleIndex,
+  options: CalendarRenderOptions
+): CalendarRenderResult {
+  const lines: string[] = [];
+  const events = [...payload.events].sort(eventSort);
+  let linkCount = 0;
+  if (!events.length) {
+    lines.push(`No Calendar events found for ${payload.targetDate}.`);
+  } else {
+    for (const event of events) {
+      const rendered = renderEvent(event, payload, people, options);
+      lines.push(...rendered.lines);
+      linkCount += rendered.linkCount;
+    }
+  }
+  return { block: makeCalendarBlock(lines), eventCount: events.length, linkCount };
+}
+
+// The string-heading overload is retained for source compatibility with 0.2.x
+// consumers. The plugin and the new overload below always use the 0.3 format.
+function renderLegacyCalendarBlock(
   payload: CalendarPayload,
   heading: string,
   people: PeopleIndex
@@ -88,14 +142,42 @@ export function renderCalendarBlockWithSummary(
     lines.push(`No Calendar events found for ${payload.targetDate}.`);
   } else {
     for (const event of events) {
-      const rendered = renderEvent(event, payload, people);
-      lines.push(rendered.line);
-      linkCount += rendered.linkCount;
+      const eventUrl = httpUrl(event.url);
+      const title = eventUrl
+        ? `[${sanitizePlainExternalText(event.title)}](${escapeMarkdownLinkUrl(eventUrl)})`
+        : sanitizePlainExternalText(event.title);
+      const peopleLinks = matchEventPeople(people, event.attendees, event.title)
+        .map((person) => person.markdownLink)
+        .filter((link): link is string => Boolean(link));
+      const when = event.allDay
+        ? "All day"
+        : `${formatLocalTime(event.start, payload.range.timeZone, "12-hour")}–${formatLocalTime(event.end, payload.range.timeZone, "12-hour")}`;
+      lines.push(`- ${title}${peopleLinks.length ? ` — ${peopleLinks.join(", ")}` : ""} — ${when}`);
+      linkCount += peopleLinks.length;
     }
   }
   return { block: makeCalendarBlock(lines), eventCount: events.length, linkCount };
 }
 
-export function renderCalendarBlock(payload: CalendarPayload, heading: string, people: PeopleIndex): string {
-  return renderCalendarBlockWithSummary(payload, heading, people).block;
+export function renderCalendarBlockWithSummary(
+  payload: CalendarPayload,
+  peopleOrHeading: PeopleIndex | string,
+  optionsOrPeople?: Partial<CalendarRenderOptions> | PeopleIndex
+): CalendarRenderResult {
+  if (typeof peopleOrHeading === "string") {
+    return renderLegacyCalendarBlock(payload, peopleOrHeading, optionsOrPeople as PeopleIndex);
+  }
+  return renderModernCalendarBlock(
+    payload,
+    peopleOrHeading,
+    { ...DEFAULT_RENDER_OPTIONS, ...(optionsOrPeople as Partial<CalendarRenderOptions> | undefined) } as CalendarRenderOptions
+  );
+}
+
+export function renderCalendarBlock(
+  payload: CalendarPayload,
+  peopleOrHeading: PeopleIndex | string,
+  optionsOrPeople?: Partial<CalendarRenderOptions> | PeopleIndex
+): string {
+  return renderCalendarBlockWithSummary(payload, peopleOrHeading, optionsOrPeople).block;
 }

@@ -19,6 +19,17 @@ export interface PeopleIndex {
   byName: Map<string, PersonLinkTarget[]>;
 }
 
+export function emptyPeopleIndex(): PeopleIndex {
+  return { byEmail: new Map(), byName: new Map() };
+}
+
+export function preparePeopleIndexForImport(
+  linkMatchingVaultNotes: boolean,
+  load: () => PeopleIndex
+): PeopleIndex {
+  return linkMatchingVaultNotes ? load() : emptyPeopleIndex();
+}
+
 export interface AttendeeIdentity {
   displayName: string | null;
   email: string | null;

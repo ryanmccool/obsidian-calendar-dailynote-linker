@@ -1,15 +1,18 @@
-import { moment, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { MarkdownView, moment, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { fetchCalendarPayload, CalendarBridgeError } from "./calendarBridge";
-import { buildPeopleIndex, preparePeopleLinks, type PeopleMarkdownFile } from "./invitees";
-import { replaceCalendarBlock } from "./block";
+import { buildPeopleIndex, preparePeopleIndexForImport, preparePeopleLinks, type PeopleMarkdownFile } from "./invitees";
 import { renderCalendarBlockWithSummary } from "./render";
 import {
   DEFAULT_SETTINGS,
+  normalizeBoolean,
+  normalizeEventHeadingLevel,
   normalizeExcludedVaultFolders,
-  normalizeSectionHeading,
-  parsePersistedExcludedVaultFolders,
+  parsePersistedPluginSettings,
+  tryNormalizeEventHeadingLevel,
   tryNormalizeExcludedVaultFolders,
-  tryNormalizeSectionHeading,
+  tryNormalizeInsertionHeading,
+  tryNormalizeInsertionMode,
+  tryNormalizeTimeFormat,
   type PluginSettings
 } from "./settings";
 import type { CalendarPayload } from "./types";
@@ -22,6 +25,11 @@ import {
   resolveActiveDailyNoteProvider,
   type ResolvedDailyNoteProvider
 } from "./dailyNoteProviders";
+import {
+  CalendarInsertionError,
+  insertCalendarBlockBelowHeading,
+  relocateCalendarBlockAtCursor
+} from "./insertion";
 
 export default class CalendarDailyNoteLinkerPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
@@ -41,24 +49,69 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
   }
 
   private async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) as { excludedVaultFolders?: unknown; sectionHeading?: unknown } | null;
-    const persistedExcludedFolders = parsePersistedExcludedVaultFolders(saved?.excludedVaultFolders);
-    this.excludedVaultFoldersPersistedInvalid = persistedExcludedFolders.malformed;
-    this.excludedVaultFoldersInput = persistedExcludedFolders.rawInput;
+    const saved = await this.loadData();
+    const parsed = parsePersistedPluginSettings(saved);
+    this.excludedVaultFoldersPersistedInvalid = parsed.excludedVaultFolders.malformed;
+    this.excludedVaultFoldersInput = parsed.excludedVaultFolders.rawInput;
     this.settings = {
-      // Older peopleFolder data is intentionally ignored: matching is vault-wide now.
-      excludedVaultFolders: persistedExcludedFolders.folders,
-      sectionHeading: normalizeSectionHeading(saved?.sectionHeading)
+      excludedVaultFolders: parsed.excludedVaultFolders.folders,
+      insertionMode: parsed.insertionMode,
+      insertionHeading: parsed.insertionHeading,
+      eventHeadingLevel: parsed.eventHeadingLevel,
+      timeFormat: parsed.timeFormat,
+      linkMatchingVaultNotes: parsed.linkMatchingVaultNotes,
+      linkEventTitles: parsed.linkEventTitles
     };
   }
 
   async saveSettings(): Promise<void> {
-    this.settings.excludedVaultFolders = normalizeExcludedVaultFolders(this.settings.excludedVaultFolders);
-    this.settings.sectionHeading = normalizeSectionHeading(this.settings.sectionHeading);
+    const excludedVaultFolders = normalizeExcludedVaultFolders(this.settings.excludedVaultFolders);
+    const insertionHeading = tryNormalizeInsertionHeading(this.settings.insertionHeading);
+    if (!insertionHeading) throw new Error("Insertion heading must be a Markdown heading from # to ######, such as # Notes.");
+    const insertionMode = tryNormalizeInsertionMode(this.settings.insertionMode);
+    if (!insertionMode) throw new Error("Insert Calendar events must be set to Below a heading or At the cursor.");
+    const eventHeadingLevel = tryNormalizeEventHeadingLevel(this.settings.eventHeadingLevel);
+    if (!eventHeadingLevel) throw new Error("Event heading level must be Heading 2 through Heading 6.");
+    const timeFormat = tryNormalizeTimeFormat(this.settings.timeFormat);
+    if (!timeFormat) throw new Error("Time format must be 24-hour or 12-hour.");
+    if (typeof this.settings.linkMatchingVaultNotes !== "boolean" || typeof this.settings.linkEventTitles !== "boolean") {
+      throw new Error("Linking settings must be enabled or disabled.");
+    }
+
+    this.settings = {
+      excludedVaultFolders,
+      insertionMode,
+      insertionHeading,
+      eventHeadingLevel,
+      timeFormat,
+      linkMatchingVaultNotes: normalizeBoolean(this.settings.linkMatchingVaultNotes, DEFAULT_SETTINGS.linkMatchingVaultNotes),
+      linkEventTitles: normalizeBoolean(this.settings.linkEventTitles, DEFAULT_SETTINGS.linkEventTitles)
+    };
     const data = this.excludedVaultFoldersPersistedInvalid
       ? { ...this.settings, excludedVaultFolders: this.excludedVaultFoldersInput ?? "" }
       : this.settings;
     await this.saveData(data);
+  }
+
+  private activeMarkdownEditor(file: import("obsidian").TFile): import("obsidian").Editor | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view?.editor || !view.file || view.file.path !== file.path) return null;
+    return view.editor;
+  }
+
+  private replaceEditorContent(editor: import("obsidian").Editor, before: string, after: string): void {
+    if (before === after) return;
+    let prefix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+    let suffix = 0;
+    while (
+      suffix < before.length - prefix &&
+      suffix < after.length - prefix &&
+      before[before.length - suffix - 1] === after[after.length - suffix - 1]
+    ) suffix += 1;
+    const from = editor.offsetToPos(prefix);
+    const to = editor.offsetToPos(before.length - suffix);
+    editor.replaceRange(after.slice(prefix, after.length - suffix), from, to, "calendar-daily-note-linker");
   }
 
   private async importIntoActiveDailyNote(): Promise<void> {
@@ -76,7 +129,7 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       if (!activeFile || activeFile.extension.toLowerCase() !== "md") {
         throw new ActiveDailyNoteError("Open an existing configured Daily Note before running this command.");
       }
-      if (this.excludedVaultFoldersPersistedInvalid) {
+      if (this.settings.linkMatchingVaultNotes && this.excludedVaultFoldersPersistedInvalid) {
         throw new Error("Saved vault folder exclusions are invalid. Correct them in settings before importing Calendar events.");
       }
 
@@ -100,21 +153,26 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
         new Notice(`Calendar warning: ${payload.warnings.join(" ")}`, 8_000);
       }
 
-      progress.setMessage("Matching vault notes…");
-      const peopleFiles: PeopleMarkdownFile[] = this.app.vault.getMarkdownFiles().map((file) => ({
-        path: file.path,
-        basename: file.basename,
-        file,
-        frontmatter: this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined
-      }));
-      const people = preparePeopleLinks(
-        buildPeopleIndex(peopleFiles, this.settings.excludedVaultFolders),
-        (target) => {
-          if (!target.file) throw new Error(`Vault note is unavailable: ${target.path}`);
-          return this.app.fileManager.generateMarkdownLink(target.file, activeFile.path, undefined, target.basename || undefined);
-        }
-      );
-      const rendered = renderCalendarBlockWithSummary(payload, this.settings.sectionHeading, people);
+      const people = preparePeopleIndexForImport(this.settings.linkMatchingVaultNotes, () => {
+        progress.setMessage("Matching vault notes…");
+        const peopleFiles: PeopleMarkdownFile[] = this.app.vault.getMarkdownFiles().map((file) => ({
+          path: file.path,
+          basename: file.basename,
+          file,
+          frontmatter: this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined
+        }));
+        return preparePeopleLinks(
+          buildPeopleIndex(peopleFiles, this.settings.excludedVaultFolders),
+          (target) => {
+            if (!target.file) throw new Error(`Vault note is unavailable: ${target.path}`);
+            return this.app.fileManager.generateMarkdownLink(target.file, activeFile.path, undefined, target.basename || undefined);
+          }
+        );
+      });
+      if (!this.settings.linkMatchingVaultNotes) {
+        progress.setMessage("Skipping vault note matching…");
+      }
+      const rendered = renderCalendarBlockWithSummary(payload, people, this.settings);
 
       progress.setMessage("Writing the active Daily Note…");
       const currentFile = this.app.workspace.getActiveFile();
@@ -131,12 +189,30 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       );
       assertActiveDailyNoteUnchanged(activeFile, currentFile, initialProvider.settings, currentProvider.settings, targetDate, currentProvider.targetDate);
       assertSameDailyNoteProvider(initialProvider, currentProvider);
-      await this.app.vault.process(activeFile, (content) => replaceCalendarBlock(content, rendered.block));
-      finish(summarizeImportOutcome(targetDate, activeFile.basename, rendered.eventCount, rendered.linkCount));
+
+      const editor = this.activeMarkdownEditor(activeFile);
+      if (this.settings.insertionMode === "cursor") {
+        if (!editor) {
+          throw new ActiveDailyNoteError("At the cursor requires the active Daily Note's Markdown editor and a usable cursor; import aborted without changing the note.");
+        }
+        const editorContent = editor.getValue();
+        const cursor = editor.getCursor();
+        const cursorOffset = editor.posToOffset(cursor);
+        const relocation = relocateCalendarBlockAtCursor(editorContent, rendered.block, cursorOffset);
+        this.replaceEditorContent(editor, editorContent, relocation.content);
+      } else if (editor) {
+        // Apply a targeted Editor change so unsaved buffer edits are retained.
+        const editorContent = editor.getValue();
+        const relocated = insertCalendarBlockBelowHeading(editorContent, rendered.block, this.settings.insertionHeading);
+        this.replaceEditorContent(editor, editorContent, relocated);
+      } else {
+        await this.app.vault.process(activeFile, (content) => insertCalendarBlockBelowHeading(content, rendered.block, this.settings.insertionHeading));
+      }
+      finish(summarizeImportOutcome(targetDate, activeFile.basename, rendered.eventCount, rendered.linkCount, this.settings));
     } catch (error) {
       const message = error instanceof CalendarBridgeError
         ? error.message
-        : error instanceof DailyNoteProviderError || error instanceof ActiveDailyNoteError
+        : error instanceof DailyNoteProviderError || error instanceof ActiveDailyNoteError || error instanceof CalendarInsertionError
           ? error.message
           : `Could not import Calendar events: ${error instanceof Error ? error.message : String(error)}`;
       finish(message);
@@ -160,6 +236,69 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
       containerEl.createEl("p", { text: "Saved vault folder exclusions are invalid; correct them before importing Calendar events." });
     }
 
+    containerEl.createEl("h3", { text: "Insertion" });
+    new Setting(containerEl)
+      .setName("Insert Calendar events")
+      .setDesc("Choose where the managed Calendar block is placed in the active Daily Note.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("heading", "Below a heading")
+          .addOption("cursor", "At the cursor")
+          .setValue(this.plugin.settings.insertionMode)
+          .onChange((value) => { void this.commitInsertionMode(dropdown, value); });
+      });
+
+    if (this.plugin.settings.insertionMode === "heading") {
+      new Setting(containerEl)
+        .setName("Insertion heading")
+        .setDesc("The managed block appears immediately below this exact standalone Markdown heading; outer incidental whitespace is trimmed, internal whitespace is preserved, and the field saves on blur. Older sectionHeading content is not used as the destination.")
+        .addText((text) => {
+          text
+            .setPlaceholder(DEFAULT_SETTINGS.insertionHeading)
+            .setValue(this.plugin.settings.insertionHeading);
+          text.inputEl.addEventListener("blur", () => { void this.commitInsertionHeading(text); });
+        });
+    }
+
+    containerEl.createEl("h3", { text: "Formatting" });
+    new Setting(containerEl)
+      .setName("Event heading level")
+      .setDesc("Each event title is rendered as a Markdown heading.")
+      .addDropdown((dropdown) => {
+        for (const level of [2, 3, 4, 5, 6] as const) dropdown.addOption(String(level), `Heading ${level}`);
+        dropdown
+          .setValue(String(this.plugin.settings.eventHeadingLevel))
+          .onChange((value) => { void this.commitEventHeadingLevel(dropdown, value); });
+      });
+
+    new Setting(containerEl)
+      .setName("Time format")
+      .setDesc("Timed events use the Calendar event's local timezone.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("24-hour", "24-hour — 09:00 – 09:30")
+          .addOption("12-hour", "12-hour — 9:00 AM – 9:30 AM")
+          .setValue(this.plugin.settings.timeFormat)
+          .onChange((value) => { void this.commitTimeFormat(dropdown, value); });
+      });
+
+    new Setting(containerEl)
+      .setName("Link matching vault notes")
+      .setDesc("Add deterministic links for uniquely matching attendees or event titles.")
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.linkMatchingVaultNotes)
+          .onChange((value) => { void this.commitBoolean(toggle, "linkMatchingVaultNotes", value); });
+      });
+
+    new Setting(containerEl)
+      .setName("Link event titles to Calendar")
+      .setDesc("Use a Calendar event URL as a Markdown link on the event title when available.")
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.linkEventTitles)
+          .onChange((value) => { void this.commitBoolean(toggle, "linkEventTitles", value); });
+      });
+
+    containerEl.createEl("h3", { text: "Vault matching" });
     new Setting(containerEl)
       .setName("Vault folders to exclude")
       .setDesc("Optional vault-relative folders to skip when matching Calendar attendees; one path per line; exclusions include subfolders; blank searches all Markdown notes.")
@@ -167,45 +306,101 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
         text
           .setPlaceholder("Archive\nTemplates\nPrivate/People")
           .setValue(this.plugin.excludedVaultFoldersInput ?? this.plugin.settings.excludedVaultFolders.join("\n"));
-        text.inputEl.addEventListener("blur", () => {
-          void this.commitExcludedVaultFolders(text);
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Section heading")
-      .setDesc("Markdown heading used inside the managed Calendar section; saves when focus leaves the field (for example ## Calendar).")
-      .addText((text) => {
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.sectionHeading)
-          .setValue(this.plugin.settings.sectionHeading);
-        text.inputEl.addEventListener("blur", () => {
-          void this.commitSectionHeading(text);
-        });
+        text.inputEl.addEventListener("blur", () => { void this.commitExcludedVaultFolders(text); });
       });
 
     containerEl.createEl("p", {
-      text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date."
+      text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date and relocates its one managed Calendar block."
     });
   }
 
-  private async commitSectionHeading(text: import("obsidian").TextComponent): Promise<void> {
-    const previous = this.plugin.settings.sectionHeading;
-    const normalized = tryNormalizeSectionHeading(text.getValue());
+  private async commitInsertionMode(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {
+    const previous = this.plugin.settings.insertionMode;
+    const normalized = tryNormalizeInsertionMode(value);
     if (!normalized) {
-      text.setValue(previous);
-      new Notice("Use a Markdown heading from # to ######, such as ## Calendar.");
+      dropdown.setValue(previous);
+      new Notice("Choose Below a heading or At the cursor.");
       return;
     }
+    this.plugin.settings.insertionMode = normalized;
+    try {
+      await this.plugin.saveSettings();
+      this.display();
+    } catch (error) {
+      this.plugin.settings.insertionMode = previous;
+      dropdown.setValue(previous);
+      new Notice(`Could not save insertion mode: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
-    this.plugin.settings.sectionHeading = normalized;
+  private async commitInsertionHeading(text: import("obsidian").TextComponent): Promise<void> {
+    const previous = this.plugin.settings.insertionHeading;
+    const normalized = tryNormalizeInsertionHeading(text.getValue());
+    if (!normalized) {
+      text.setValue(previous);
+      new Notice("Use an exact Markdown heading from # to ######, such as # Notes.");
+      return;
+    }
+    this.plugin.settings.insertionHeading = normalized;
     text.setValue(normalized);
     try {
       await this.plugin.saveSettings();
     } catch (error) {
-      this.plugin.settings.sectionHeading = previous;
+      this.plugin.settings.insertionHeading = previous;
       text.setValue(previous);
-      new Notice(`Could not save the Section heading: ${error instanceof Error ? error.message : String(error)}`);
+      new Notice(`Could not save the Insertion heading: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async commitEventHeadingLevel(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {
+    const previous = this.plugin.settings.eventHeadingLevel;
+    const normalized = tryNormalizeEventHeadingLevel(value);
+    if (!normalized) {
+      dropdown.setValue(String(previous));
+      new Notice("Choose an event heading level from Heading 2 through Heading 6.");
+      return;
+    }
+    this.plugin.settings.eventHeadingLevel = normalized;
+    try {
+      await this.plugin.saveSettings();
+    } catch (error) {
+      this.plugin.settings.eventHeadingLevel = previous;
+      dropdown.setValue(String(previous));
+      new Notice(`Could not save the Event heading level: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async commitTimeFormat(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {
+    const previous = this.plugin.settings.timeFormat;
+    const normalized = tryNormalizeTimeFormat(value);
+    if (!normalized) {
+      dropdown.setValue(previous);
+      new Notice("Choose 24-hour or 12-hour time format.");
+      return;
+    }
+    this.plugin.settings.timeFormat = normalized;
+    try {
+      await this.plugin.saveSettings();
+    } catch (error) {
+      this.plugin.settings.timeFormat = previous;
+      dropdown.setValue(previous);
+      new Notice(`Could not save the Time format: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async commitBoolean(
+    toggle: import("obsidian").ToggleComponent,
+    key: "linkMatchingVaultNotes" | "linkEventTitles",
+    value: boolean
+  ): Promise<void> {
+    const previous = this.plugin.settings[key];
+    this.plugin.settings[key] = value;
+    try {
+      await this.plugin.saveSettings();
+    } catch (error) {
+      this.plugin.settings[key] = previous;
+      toggle.setValue(previous);
+      new Notice(`Could not save linking setting: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { replaceCalendarBlock } from "../src/block";
-import { buildPeopleIndex, matchAttendee, matchEventPeople, preparePeopleLinks } from "../src/invitees";
-import { renderCalendarBlock } from "../src/render";
-import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, tryNormalizeExcludedVaultFolders, tryNormalizeSectionHeading } from "../src/settings";
+import { buildPeopleIndex, matchAttendee, matchEventPeople, preparePeopleIndexForImport, preparePeopleLinks } from "../src/invitees";
+import { renderCalendarBlock, renderCalendarBlockWithSummary } from "../src/render";
+import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, parsePersistedPluginSettings, tryNormalizeExcludedVaultFolders, tryNormalizeInsertionHeading, tryNormalizeSectionHeading } from "../src/settings";
+import { calculateCursorInsertionOffset, insertCalendarBlockBelowHeading, relocateCalendarBlockAtCursor } from "../src/insertion";
+import { parseStandaloneAtxHeadings } from "../src/markdown";
 import { validateCalendarPayload } from "../src/calendarPayload";
 import { CalendarBridgeError, fetchCalendarPayload } from "../src/calendarBridge";
 import { CALENDAR_EVENTS_SCRIPT } from "../src/calendarEventsSource";
@@ -85,9 +87,94 @@ describe("People matching", () => {
     expect(matchAttendee(index, { email: null, displayName: "the   enchantress" })?.path)
       .toBe("People/Engineering/Ada Lovelace.md");
   });
+
+  it("does not load a vault index when matching links are disabled", () => {
+    let loads = 0;
+    const disabled = preparePeopleIndexForImport(false, () => {
+      loads += 1;
+      return buildPeopleIndex([{ path: "People/Ada.md", basename: "Ada", frontmatter: {} }], ["../invalid"]);
+    });
+    expect(loads).toBe(0);
+    expect(disabled.byEmail.size).toBe(0);
+    expect(disabled.byName.size).toBe(0);
+
+    preparePeopleIndexForImport(true, () => {
+      loads += 1;
+      return buildPeopleIndex([], []);
+    });
+    expect(loads).toBe(1);
+  });
 });
 
 describe("Calendar rendering", () => {
+  it("renders the default events as two-line Heading 2 and 24-hour entries", () => {
+    const rendered = renderCalendarBlockWithSummary(payload([
+      event({ title: "Mike - Ryan catchup", start: "2025-01-15T14:00:00.000Z", end: "2025-01-15T14:30:00.000Z" })
+    ]), buildPeopleIndex([], []));
+
+    expect(rendered.block).toBe([
+      "<!-- calendar-daily-note-linker:start -->",
+      "## Mike - Ryan catchup",
+      "09:00 – 09:30",
+      "<!-- calendar-daily-note-linker:end -->"
+    ].join("\n"));
+  });
+
+  it("supports event Heading 3 and 12-hour formatting", () => {
+    const rendered = renderCalendarBlockWithSummary(payload([
+      event({ title: "Planning", start: "2025-01-15T14:00:00.000Z", end: "2025-01-15T15:30:00.000Z" })
+    ]), buildPeopleIndex([], []), {
+      eventHeadingLevel: 3,
+      timeFormat: "12-hour",
+      linkMatchingVaultNotes: true,
+      linkEventTitles: true
+    });
+
+    expect(rendered.block).toContain("### Planning\n9:00 AM – 10:30 AM");
+  });
+
+  it("renders all-day events on the second line", () => {
+    const rendered = renderCalendarBlockWithSummary(payload([
+      event({ title: "Company holiday", allDay: true })
+    ]), buildPeopleIndex([], []));
+    expect(rendered.block).toContain("## Company holiday\nAll day");
+  });
+
+  it("honors matching-note and event-title link toggles", () => {
+    const people = preparePeopleLinks(buildPeopleIndex([
+      { path: "People/Mike.md", basename: "Mike", frontmatter: {} }
+    ], []), (target) => `[[${target.path}|${target.basename}]]`);
+    const linked = renderCalendarBlockWithSummary(payload([event({
+      title: "Mike",
+      url: "https://example.com/event",
+      attendees: [{ displayName: "Mike", email: null, status: "unknown" }]
+    })]), people);
+    expect(linked.block).toContain("## [Mike](https://example.com/event) — [[People/Mike.md|Mike]]");
+
+    const unlinked = renderCalendarBlockWithSummary(payload([event({
+      title: "Mike",
+      url: "https://example.com/event",
+      attendees: [{ displayName: "Mike", email: null, status: "unknown" }]
+    })]), people, {
+      eventHeadingLevel: 2,
+      timeFormat: "24-hour",
+      linkMatchingVaultNotes: false,
+      linkEventTitles: false
+    });
+    expect(unlinked.block).toContain("## Mike\n");
+    expect(unlinked.block).not.toContain("People/Mike");
+    expect(unlinked.block).not.toContain("https://example.com/event");
+
+    const matchingDisabled = renderCalendarBlockWithSummary(payload([event({
+      title: "Mike",
+      url: "https://example.com/event"
+    })]), { byEmail: new Map(), byName: new Map() }, {
+      linkMatchingVaultNotes: false,
+      linkEventTitles: true
+    });
+    expect(matchingDisabled.block).toContain("## [Mike](https://example.com/event)");
+  });
+
   it("uses the target date rather than today in an empty historical block", () => {
     expect(renderCalendarBlock(payload([]), "## Calendar", buildPeopleIndex([], [])))
       .toContain("No Calendar events found for 2025-01-15.");
@@ -178,6 +265,78 @@ describe("Calendar rendering", () => {
   });
 });
 
+describe("configured insertion and cursor relocation", () => {
+  const block = "<!-- calendar-daily-note-linker:start -->\n## New event\n09:00 – 09:30\n<!-- calendar-daily-note-linker:end -->";
+
+  it("finds only real headings outside frontmatter, backtick/tilde fences, and indented code", () => {
+    const note = [
+      "---",
+      "# Notes",
+      "title: frontmatter",
+      "...",
+      "```markdown",
+      "# Notes",
+      "```",
+      "~~~markdown",
+      "# Notes",
+      "~~~",
+      "    # Notes",
+      "# Notes",
+      "After"
+    ].join("\n");
+    expect(parseStandaloneAtxHeadings(note).map((heading) => heading.text)).toEqual(["# Notes"]);
+    expect(insertCalendarBlockBelowHeading(note, block, "# Notes")).toBe([
+      "---",
+      "# Notes",
+      "title: frontmatter",
+      "...",
+      "```markdown",
+      "# Notes",
+      "```",
+      "~~~markdown",
+      "# Notes",
+      "~~~",
+      "    # Notes",
+      "# Notes",
+      block,
+      "After"
+    ].join("\n"));
+  });
+
+  it("inserts below exactly one heading and is idempotent while relocating the block", () => {
+    const first = insertCalendarBlockBelowHeading("Before\n# Notes\nAfter", block, "# Notes");
+    expect(first).toBe(`Before\n# Notes\n${block}\nAfter`);
+
+    const moved = insertCalendarBlockBelowHeading(
+      `Before\n${block}\n# Notes\nAfter`,
+      block.replace("New event", "Updated event"),
+      "# Notes"
+    );
+    expect(moved).toBe(`Before\n# Notes\n${block.replace("New event", "Updated event")}\nAfter`);
+    expect((moved.match(/calendar-daily-note-linker:start/g) ?? []).length).toBe(1);
+  });
+
+  it("does not mutate when the insertion heading is missing or duplicated", () => {
+    for (const note of ["Before\nOther", "# Notes\nOne\n# Notes\nTwo"]) {
+      expect(() => insertCalendarBlockBelowHeading(note, block, "# Notes")).toThrow(/exactly once/);
+      expect(note).not.toContain(block);
+    }
+  });
+
+  it("corrects the cursor offset around an old managed block", () => {
+    const old = `Before\n${block.replace("New event", "Old event")}\nAfter`;
+    const cursor = old.indexOf("After");
+    const rangeStart = old.indexOf("<!-- calendar-daily-note-linker:start -->");
+    const rangeEnd = old.indexOf("<!-- calendar-daily-note-linker:end -->") + "<!-- calendar-daily-note-linker:end -->".length + 1;
+    expect(calculateCursorInsertionOffset(cursor, { start: rangeStart, end: rangeEnd })).toBe(cursor - (rangeEnd - rangeStart));
+    const relocated = relocateCalendarBlockAtCursor(old, block, cursor);
+    expect(relocated.content).toBe(`Before\n${block}\nAfter`);
+
+    const inside = relocateCalendarBlockAtCursor(old, block, rangeStart + 5);
+    expect(inside.content).toBe(`Before\n${block}\nAfter`);
+  });
+});
+
 describe("managed block replacement", () => {
   it("preserves unrelated note contents on first and subsequent runs", () => {
     const block = "<!-- calendar-daily-note-linker:start -->\n## Calendar\n- New\n<!-- calendar-daily-note-linker:end -->";
@@ -252,11 +411,54 @@ describe("People links and settings", () => {
   });
 
   it("distinguishes valid completed headings from invalid input without a defaulting side effect", () => {
-    expect(tryNormalizeSectionHeading("  ###  Daily Notes  ")).toBe("### Daily Notes");
-    expect(normalizeSectionHeading("  ###  Daily Notes  ")).toBe("### Daily Notes");
+    expect(tryNormalizeSectionHeading("  ###  Daily Notes  ")).toBe("###  Daily Notes");
+    expect(normalizeSectionHeading("  ###  Daily Notes  ")).toBe("###  Daily Notes");
     expect(tryNormalizeSectionHeading("#")).toBeUndefined();
     expect(tryNormalizeSectionHeading("Calendar")).toBeUndefined();
     expect(normalizeSectionHeading("Calendar")).toBe("## Calendar");
+  });
+
+  it("does not migrate old inside-block sectionHeading into the destination and ignores People settings", () => {
+    const migrated = parsePersistedPluginSettings({
+      sectionHeading: "### Legacy destination",
+      peopleFolder: "People",
+      eventHeadingLevel: "3",
+      timeFormat: "12-hour",
+      insertionMode: "cursor"
+    });
+    expect(migrated.insertionHeading).toBe("# Notes");
+    expect(migrated.insertionMode).toBe("cursor");
+    expect(migrated.eventHeadingLevel).toBe(3);
+    expect(migrated.timeFormat).toBe("12-hour");
+    expect(migrated).not.toHaveProperty("peopleFolder");
+
+    const invalidNewHeading = parsePersistedPluginSettings({
+      sectionHeading: "### Old",
+      insertionHeading: "not a heading"
+    });
+    expect(invalidNewHeading.insertionHeading).toBe("# Notes");
+
+    const oldBlock = "<!-- calendar-daily-note-linker:start -->\n### Legacy destination\n- Old event\n<!-- calendar-daily-note-linker:end -->";
+    const withRealDestination = `${oldBlock}\n# Notes\nPrivate`;
+    expect(insertCalendarBlockBelowHeading(withRealDestination, oldBlock.replace("Old event", "New event"), "# Notes"))
+      .toBe(`# Notes\n${oldBlock.replace("Old event", "New event")}\nPrivate`);
+
+    const destinationOnlyInsideOldBlock = oldBlock;
+    expect(() => insertCalendarBlockBelowHeading(destinationOnlyInsideOldBlock, oldBlock, "# Notes")).toThrow(/not found exactly once/);
+    expect(destinationOnlyInsideOldBlock).toBe(oldBlock);
+  });
+
+  it("preserves internal heading whitespace while rejecting unsafe headings", () => {
+    expect(tryNormalizeInsertionHeading("  # Project  Notes  ")).toBe("# Project  Notes");
+    expect(tryNormalizeInsertionHeading("# Project\tNotes")).toBe("# Project\tNotes");
+    expect(tryNormalizeInsertionHeading("# Project\nNotes")).toBeUndefined();
+    expect(tryNormalizeInsertionHeading("# Project\u0001Notes")).toBeUndefined();
+    expect(tryNormalizeInsertionHeading("####### Project")).toBeUndefined();
+    expect(tryNormalizeInsertionHeading("#")).toBeUndefined();
+
+    const note = "# Project  Notes\nAfter";
+    expect(insertCalendarBlockBelowHeading(note, "<!-- calendar-daily-note-linker:start -->\nEvent\n<!-- calendar-daily-note-linker:end -->", "# Project  Notes"))
+      .toContain("# Project  Notes\n<!-- calendar-daily-note-linker:start -->");
   });
 });
 
@@ -536,6 +738,17 @@ describe("active Daily Note resolution and outcome summaries", () => {
       .toBe("Imported 2 Calendar events into 2025-01-14 and added 3 vault links.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 1, 1))
       .toBe("Imported 1 Calendar event into 2025-01-14 and added 1 vault link.");
+  });
+
+  it("describes the configured destination, formatting, links, and relocation", () => {
+    expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 1, 1, {
+      insertionMode: "heading",
+      insertionHeading: "# Notes",
+      eventHeadingLevel: 2,
+      timeFormat: "24-hour",
+      linkMatchingVaultNotes: true,
+      linkEventTitles: true
+    })).toContain("below # Notes; Heading 2, 24-hour, matching vault notes on, event title links on; managed block relocated");
   });
 
   it("rejects active-file identity, path, date, and configuration changes", () => {

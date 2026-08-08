@@ -8,42 +8,65 @@ export class CalendarBlockError extends Error {
   }
 }
 
+export interface CalendarBlockRange {
+  start: number;
+  end: number;
+}
+
+interface NoteLine {
+  raw: string;
+  content: string;
+  start: number;
+  end: number;
+  next: number;
+}
+
 export function makeCalendarBlock(lines: readonly string[]): string {
   return [CALENDAR_START_MARKER, ...lines.map(sanitizeMarkdownLine), CALENDAR_END_MARKER].join("\n");
 }
 
 export function replaceCalendarBlock(noteContent: string, block: string): string {
   validateGeneratedBlock(block);
-  const starts: number[] = [];
-  const ends: number[] = [];
-  const lines = noteContent.split("\n");
+  const range = findCalendarBlockRange(noteContent);
+  if (!range) {
+    return appendCalendarBlock(noteContent, block);
+  }
+  const replacement = noteContent.slice(range.start, range.end).endsWith("\n") ? `${block}\n` : block;
+  return `${noteContent.slice(0, range.start)}${replacement}${noteContent.slice(range.end)}`;
+}
 
-  lines.forEach((rawLine, index) => {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    const isStart = line === CALENDAR_START_MARKER;
-    const isEnd = line === CALENDAR_END_MARKER;
-    if (isStart) starts.push(index);
-    if (isEnd) ends.push(index);
+/** Find and validate the one managed block, returning line-inclusive offsets. */
+export function findCalendarBlockRange(noteContent: string): CalendarBlockRange | null {
+  const lines = noteLines(noteContent);
+  const starts: NoteLine[] = [];
+  const ends: NoteLine[] = [];
 
-    const containsMarker = line.includes(CALENDAR_START_MARKER) || line.includes(CALENDAR_END_MARKER);
+  for (const line of lines) {
+    const isStart = line.content === CALENDAR_START_MARKER;
+    const isEnd = line.content === CALENDAR_END_MARKER;
+    if (isStart) starts.push(line);
+    if (isEnd) ends.push(line);
+
+    const containsMarker = line.content.includes(CALENDAR_START_MARKER) || line.content.includes(CALENDAR_END_MARKER);
     if (containsMarker && !isStart && !isEnd) {
       throw new CalendarBlockError("The Calendar section marker must be on an exact standalone line.");
     }
-  });
-
-  if (starts.length === 0 && ends.length === 0) {
-    return appendCalendarBlock(noteContent, block);
   }
-  if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) {
+
+  if (starts.length === 0 && ends.length === 0) return null;
+  if (starts.length !== 1 || ends.length !== 1 || starts[0].start >= ends[0].start) {
     throw new CalendarBlockError("The Calendar section markers are duplicated, incomplete, or out of order.");
   }
-
-  const startOffset = lineStartOffset(lines, starts[0]);
-  const endOffset = lineStartOffset(lines, ends[0] + 1);
-  return `${noteContent.slice(0, startOffset)}${block}${noteContent.slice(endOffset)}`;
+  return { start: starts[0].start, end: ends[0].next };
 }
 
-function validateGeneratedBlock(block: string): void {
+export function removeCalendarBlock(noteContent: string): string {
+  const range = findCalendarBlockRange(noteContent);
+  if (!range) return noteContent;
+  return `${noteContent.slice(0, range.start)}${noteContent.slice(range.end)}`;
+}
+
+export function validateGeneratedBlock(block: string): void {
   const lines = block.split("\n").map((rawLine) => rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine);
   if (lines[0] !== CALENDAR_START_MARKER || lines[lines.length - 1] !== CALENDAR_END_MARKER) {
     throw new CalendarBlockError("Generated Calendar content has invalid section markers.");
@@ -74,10 +97,15 @@ function appendCalendarBlock(noteContent: string, block: string): string {
   return `${noteContent}${separator}${block}\n`;
 }
 
-function lineStartOffset(lines: readonly string[], lineIndex: number): number {
+function noteLines(noteContent: string): NoteLine[] {
+  const rawLines = noteContent.split("\n");
+  const lines: NoteLine[] = [];
   let offset = 0;
-  for (let index = 0; index < lineIndex && index < lines.length; index += 1) {
-    offset += lines[index].length + 1;
+  for (const raw of rawLines) {
+    const content = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const end = offset + raw.length;
+    lines.push({ raw, content, start: offset, end, next: Math.min(noteContent.length, end + 1) });
+    offset = end + 1;
   }
-  return offset;
+  return lines;
 }
