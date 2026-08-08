@@ -1,4 +1,4 @@
-import { matchAttendee, normalizeCaseFold, normalizeName } from "./invitees";
+import { matchAttendee, normalizeCaseFold, normalizeEmail, normalizeName } from "./invitees";
 import { makeCalendarBlock, sanitizePlainExternalText } from "./block";
 import type { PeopleIndex, PersonLinkTarget } from "./invitees";
 import type { CalendarEvent, CalendarPayload } from "./types";
@@ -46,6 +46,33 @@ function eventSort(left: CalendarEvent, right: CalendarEvent): number {
   const byEnd = Date.parse(left.end) - Date.parse(right.end);
   if (byEnd !== 0) return byEnd;
   return left.title.localeCompare(right.title);
+}
+
+function eventDeduplicationKey(event: CalendarEvent): string {
+  const attendeeIdentities = [...new Set(event.attendees.map((attendee) => JSON.stringify([
+    normalizeEmail(attendee.email ?? ""),
+    normalizeName(attendee.displayName ?? "")
+  ])))].sort();
+  return JSON.stringify([
+    normalizeName(event.title),
+    event.start,
+    event.end,
+    event.allDay,
+    httpUrl(event.url) ?? "",
+    attendeeIdentities
+  ]);
+}
+
+function deduplicateEvents(events: readonly CalendarEvent[]): CalendarEvent[] {
+  const seen = new Set<string>();
+  const unique: CalendarEvent[] = [];
+  for (const event of events) {
+    const key = eventDeduplicationKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(event);
+  }
+  return unique;
 }
 
 export function formatLocalTime(
@@ -372,7 +399,7 @@ function renderModernCalendarBlock(
   options: CalendarRenderOptions
 ): CalendarRenderResult {
   const lines: string[] = [];
-  const events = [...payload.events].sort(eventSort);
+  const events = deduplicateEvents(payload.events).sort(eventSort);
   let linkCount = 0;
   if (!events.length) {
     lines.push(`No Calendar events found for ${payload.targetDate}.`);
@@ -394,7 +421,7 @@ function renderLegacyCalendarBlock(
   people: PeopleIndex
 ): CalendarRenderResult {
   const lines = [heading];
-  const events = [...payload.events].sort(eventSort);
+  const events = deduplicateEvents(payload.events).sort(eventSort);
   let linkCount = 0;
   if (!events.length) {
     lines.push(`No Calendar events found for ${payload.targetDate}.`);

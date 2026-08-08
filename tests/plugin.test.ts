@@ -148,6 +148,114 @@ describe("Calendar rendering", () => {
     expect(rendered.block).toContain("## Company holiday\nAll day");
   });
 
+  it("deduplicates normalized all-day duplicates across calendar names and preserves the first occurrence", () => {
+    const events = [
+      event({
+        id: "first",
+        calendar: "Work",
+        title: "OOO",
+        start: "2025-01-15T05:00:00.000Z",
+        end: "2025-01-16T05:00:00.000Z",
+        allDay: true,
+        url: " HTTPS://EXAMPLE.COM/ooo ",
+        attendees: [
+          { email: "ALICE@EXAMPLE.COM", displayName: "Alice Smith", status: "accepted" },
+          { email: "BOB@EXAMPLE.COM", displayName: "Bob Smith", status: "accepted" }
+        ]
+      }),
+      event({
+        id: "mirror",
+        calendar: "Personal",
+        title: "  ooo  ",
+        start: "2025-01-15T05:00:00.000Z",
+        end: "2025-01-16T05:00:00.000Z",
+        allDay: true,
+        url: "https://example.com/ooo",
+        attendees: [
+          { email: " bob@example.com ", displayName: " bob   smith ", status: "declined" },
+          { email: " alice@example.com ", displayName: " alice smith ", status: "tentative" }
+        ]
+      })
+    ];
+    const modern = renderCalendarBlockWithSummary(payload(events), buildPeopleIndex([], []));
+    const legacy = renderCalendarBlockWithSummary(payload(events), "## Calendar", buildPeopleIndex([], []));
+
+    expect(modern.eventCount).toBe(1);
+    expect(legacy.eventCount).toBe(1);
+    expect(modern.linkCount).toBe(0);
+    expect(legacy.linkCount).toBe(0);
+    expect(modern.block).toContain("## [OOO](https://example.com/ooo)\nAll day");
+    expect(legacy.block).toContain("[OOO](https://example.com/ooo)\nAll day");
+  });
+
+  it("keeps distinct same-time events separate when any deduplication field differs", () => {
+    const base = event({
+      title: "Same",
+      start: "2025-01-15T14:00:00.000Z",
+      end: "2025-01-15T15:00:00.000Z",
+      allDay: false,
+      attendees: [{ email: "ada@example.com", displayName: "Ada", status: "accepted" }]
+    });
+    const events = [
+      base,
+      event({ ...base, id: "url", url: "https://example.com/one" }),
+      event({ ...base, id: "attendee", attendees: [{ email: "bob@example.com", displayName: "Bob", status: "accepted" }] }),
+      event({ ...base, id: "title", title: "Other" }),
+      event({ ...base, id: "end", end: "2025-01-15T15:30:00.000Z" }),
+      event({ ...base, id: "all-day", allDay: true })
+    ];
+    const modern = renderCalendarBlockWithSummary(payload(events), buildPeopleIndex([], []));
+    const legacy = renderCalendarBlockWithSummary(payload(events), "## Calendar", buildPeopleIndex([], []));
+
+    expect(modern.eventCount).toBe(6);
+    expect(legacy.eventCount).toBe(6);
+    expect(modern.block).toContain("## Same\n09:00 – 10:00");
+    expect(modern.block).toContain("## Other\n09:00 – 10:00");
+  });
+
+  it("deduplicates before sorting while preserving attendee title links in both paths", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "People/Randy Swensen.md", basename: "Randy Swensen", frontmatter: {} },
+      { path: "People/Ryan Chen.md", basename: "Ryan Chen", frontmatter: {} }
+    ], []), true);
+    const events = [
+      event({
+        id: "first",
+        calendar: "Work",
+        title: "Randy and Ryan",
+        start: "2025-01-15T13:00:00.000Z",
+        end: "2025-01-15T14:00:00.000Z",
+        attendees: [
+          { email: null, displayName: "Randy Swensen", status: "accepted" },
+          { email: null, displayName: "Ryan Chen", status: "accepted" }
+        ]
+      }),
+      event({
+        id: "mirror",
+        calendar: "Personal",
+        title: " randy   AND  ryan ",
+        start: "2025-01-15T13:00:00.000Z",
+        end: "2025-01-15T14:00:00.000Z",
+        attendees: [
+          { email: null, displayName: " rYaN   cHeN ", status: "declined" },
+          { email: null, displayName: " rAnDy swensen ", status: "tentative" }
+        ]
+      }),
+      event({ title: "Later", start: "2025-01-15T16:00:00.000Z", end: "2025-01-15T17:00:00.000Z" })
+    ];
+    const modern = renderCalendarBlockWithSummary(payload(events), people);
+    const legacy = renderCalendarBlockWithSummary(payload(events), "## Calendar", people);
+
+    expect(modern.eventCount).toBe(2);
+    expect(legacy.eventCount).toBe(2);
+    expect(modern.linkCount).toBe(2);
+    expect(legacy.linkCount).toBe(2);
+    expect(modern.block).toContain("## [[People/Randy Swensen|Randy]] and [[People/Ryan Chen|Ryan]]\n08:00 – 09:00");
+    expect(legacy.block).toContain("[[People/Randy Swensen|Randy]] and [[People/Ryan Chen|Ryan]]\n8:00 AM–9:00 AM");
+    expect(modern.block.indexOf("Randy")).toBeLessThan(modern.block.indexOf("Later"));
+    expect(legacy.block.indexOf("Randy")).toBeLessThan(legacy.block.indexOf("Later"));
+  });
+
   it("keeps attendee wikilinks separate from Calendar URLs and honors link toggles", () => {
     const people = preparedPeople(buildPeopleIndex([
       { path: "People/Mike.md", basename: "Mike", frontmatter: {} }
