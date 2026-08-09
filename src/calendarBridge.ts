@@ -107,7 +107,8 @@ function parseCalendarList(output: string): CalendarInfo[] {
 export async function fetchAvailableCalendars(run: CalendarCommandRunner = defaultRunner): Promise<CalendarInfo[]> {
   let result: CalendarProcessResult;
   try {
-    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, "--list-calendars"], {
+    // osascript parses a leading hyphen in positional arguments as an option.
+    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, "--", "--list-calendars"], {
       encoding: "utf8",
       timeout: 30_000,
       maxBuffer: 2 * 1024 * 1024,

@@ -939,7 +939,7 @@ describe("bridge and payload safety", () => {
 
   it("lists available Calendar identifiers and display names", async () => {
     const calendars = await fetchAvailableCalendars(async (_command, args) => {
-      expect(args[4]).toBe("--list-calendars");
+      expect(args.slice(4)).toEqual(["--", "--list-calendars"]);
       return { stdout: JSON.stringify([{ id: "calendar-a", title: "Work", source: "iCloud" }]), stderr: "" };
     });
     expect(calendars).toEqual([{ id: "calendar-a", title: "Work", source: "iCloud" }]);
