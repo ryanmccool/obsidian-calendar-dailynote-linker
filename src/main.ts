@@ -1,5 +1,5 @@
 import { MarkdownView, moment, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { fetchCalendarPayload, CalendarBridgeError } from "./calendarBridge";
+import { fetchAvailableCalendars, fetchCalendarPayload, CalendarBridgeError, type CalendarInfo } from "./calendarBridge";
 import { buildPeopleIndex, preparePeopleIndexForImport, preparePeopleLinks, type PeopleMarkdownFile } from "./invitees";
 import { renderCalendarBlockWithSummary } from "./render";
 import {
@@ -7,6 +7,7 @@ import {
   normalizeBoolean,
   normalizeEventHeadingLevel,
   normalizeExcludedVaultFolders,
+  normalizeSelectedCalendarIds,
   parsePersistedPluginSettings,
   tryNormalizeEventHeadingLevel,
   tryNormalizeExcludedVaultFolders,
@@ -32,6 +33,8 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
   excludedVaultFoldersPersistedInvalid = false;
   excludedVaultFoldersInput: string | undefined;
+  selectedCalendarIdsPersistedInvalid = false;
+  selectedCalendarIdsInput: unknown;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -50,8 +53,11 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
     const parsed = parsePersistedPluginSettings(saved);
     this.excludedVaultFoldersPersistedInvalid = parsed.excludedVaultFolders.malformed;
     this.excludedVaultFoldersInput = parsed.excludedVaultFolders.rawInput;
+    this.selectedCalendarIdsPersistedInvalid = parsed.selectedCalendarIds.malformed;
+    this.selectedCalendarIdsInput = parsed.selectedCalendarIds.rawInput;
     this.settings = {
       excludedVaultFolders: parsed.excludedVaultFolders.folders,
+      selectedCalendarIds: parsed.selectedCalendarIds.ids,
       insertionMode: parsed.insertionMode,
       insertionHeading: parsed.insertionHeading,
       eventHeadingLevel: parsed.eventHeadingLevel,
@@ -63,6 +69,7 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     const excludedVaultFolders = normalizeExcludedVaultFolders(this.settings.excludedVaultFolders);
+    const selectedCalendarIds = normalizeSelectedCalendarIds(this.settings.selectedCalendarIds);
     const eventHeadingLevel = tryNormalizeEventHeadingLevel(this.settings.eventHeadingLevel);
     if (!eventHeadingLevel) throw new Error("Event heading level must be Heading 3 through Heading 6.");
     const timeFormat = tryNormalizeTimeFormat(this.settings.timeFormat);
@@ -73,6 +80,7 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
     this.settings = {
       excludedVaultFolders,
+      selectedCalendarIds,
       insertionMode: "heading",
       insertionHeading: "# Notes",
       eventHeadingLevel,
@@ -80,9 +88,11 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       linkMatchingVaultNotes: normalizeBoolean(this.settings.linkMatchingVaultNotes, DEFAULT_SETTINGS.linkMatchingVaultNotes),
       linkEventTitles: normalizeBoolean(this.settings.linkEventTitles, DEFAULT_SETTINGS.linkEventTitles)
     };
-    const data = this.excludedVaultFoldersPersistedInvalid
-      ? { ...this.settings, excludedVaultFolders: this.excludedVaultFoldersInput ?? "" }
-      : this.settings;
+    const data = {
+      ...this.settings,
+      ...(this.excludedVaultFoldersPersistedInvalid ? { excludedVaultFolders: this.excludedVaultFoldersInput ?? "" } : {}),
+      ...(this.selectedCalendarIdsPersistedInvalid ? { selectedCalendarIds: this.selectedCalendarIdsInput } : {})
+    };
     await this.saveData(data);
   }
 
@@ -125,6 +135,9 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       if (this.settings.linkMatchingVaultNotes && this.excludedVaultFoldersPersistedInvalid) {
         throw new Error("Saved vault folder exclusions are invalid. Correct them in settings before importing Calendar events.");
       }
+      if (this.selectedCalendarIdsPersistedInvalid) {
+        throw new Error("Saved Calendar selection is invalid. Correct it in settings before importing Calendar events.");
+      }
 
       const parseDateFromPath = (relativeStem: string, format: string) =>
         (moment as unknown as (input: string, format: string, strict: boolean) => import("moment").Moment)(relativeStem, format, true);
@@ -141,7 +154,7 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       const targetDate = initialProvider.targetDate;
 
       progress.setMessage(`Reading Calendar for ${targetDate}…`);
-      const payload: CalendarPayload = await fetchCalendarPayload(targetDate);
+      const payload: CalendarPayload = await fetchCalendarPayload(targetDate, this.settings.selectedCalendarIds);
       if (payload.warnings.length) {
         new Notice(`Calendar warning: ${payload.warnings.join(" ")}`, 8_000);
       }
@@ -207,6 +220,9 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
 class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
   plugin: CalendarDailyNoteLinkerPlugin;
+  private calendarOptions: CalendarInfo[] | undefined;
+  private calendarLoadError: string | undefined;
+  private calendarLoadInFlight = false;
 
   constructor(app: import("obsidian").App, plugin: CalendarDailyNoteLinkerPlugin) {
     super(app, plugin);
@@ -219,6 +235,56 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "Calendar Daily Note Linker" });
     if (this.plugin.excludedVaultFoldersPersistedInvalid) {
       containerEl.createEl("p", { text: "Saved vault folder exclusions are invalid; correct them before importing Calendar events." });
+    }
+    if (this.plugin.selectedCalendarIdsPersistedInvalid) {
+      containerEl.createEl("p", { text: "Saved Calendar selection is invalid; choose a Calendar scope before importing events." });
+    }
+
+    containerEl.createEl("h3", { text: "Calendars" });
+    new Setting(containerEl)
+      .setName("Sync all calendars")
+      .setDesc("When enabled, imports events from every Calendar available to macOS.")
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.selectedCalendarIds === null)
+          .onChange((value) => { void this.commitCalendarScope(value); });
+      });
+
+    new Setting(containerEl)
+      .setName("Available macOS calendars")
+      .setDesc("Load or refresh Calendar names before choosing a specific set to sync.")
+      .addButton((button) => {
+        button.setButtonText(this.calendarLoadInFlight ? "Loading…" : "Refresh calendars")
+          .setDisabled(this.calendarLoadInFlight)
+          .onClick(() => { void this.loadCalendarOptions(); });
+      });
+
+    if (this.calendarLoadError) {
+      containerEl.createEl("p", { text: `Could not load macOS calendars: ${this.calendarLoadError}` });
+    } else if (this.calendarOptions) {
+      if (this.plugin.settings.selectedCalendarIds === null) {
+        containerEl.createEl("p", { text: "All available calendars will be imported. Turn off “Sync all calendars” to choose individual calendars." });
+      } else if (!this.calendarOptions.length) {
+        containerEl.createEl("p", { text: "No event calendars are available to macOS." });
+      } else {
+        const availableIds = new Set(this.calendarOptions.map((calendar) => calendar.id));
+        const selectedAvailableIds = this.plugin.settings.selectedCalendarIds.filter((id) => availableIds.has(id));
+        const unavailableCount = this.plugin.settings.selectedCalendarIds.length - selectedAvailableIds.length;
+        for (const calendar of this.calendarOptions) {
+          new Setting(containerEl)
+            .setName(calendar.title)
+            .setDesc(calendar.source ? `Account: ${calendar.source}` : "Calendar account unavailable")
+            .addToggle((toggle) => {
+              toggle.setValue(this.plugin.settings.selectedCalendarIds?.includes(calendar.id) ?? false)
+                .onChange((value) => { void this.commitCalendarEnabled(calendar.id, value); });
+            });
+        }
+        if (unavailableCount) {
+          containerEl.createEl("p", { text: `${unavailableCount} selected calendar${unavailableCount === 1 ? " is" : "s are"} no longer available to macOS.` });
+        }
+        if (!selectedAvailableIds.length) {
+          containerEl.createEl("p", { text: "No available calendars are selected, so imports will contain no events." });
+        }
+      }
     }
 
     containerEl.createEl("h3", { text: "Formatting" });
@@ -273,6 +339,58 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
     containerEl.createEl("p", {
       text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date and replaces the visible ## Calendar section under # Notes."
     });
+  }
+
+  private async loadCalendarOptions(): Promise<void> {
+    if (this.calendarLoadInFlight) return;
+    this.calendarLoadInFlight = true;
+    this.calendarLoadError = undefined;
+    this.display();
+    try {
+      if (process.platform !== "darwin") throw new Error("Calendar selection requires macOS desktop.");
+      this.calendarOptions = await fetchAvailableCalendars();
+    } catch (error) {
+      this.calendarOptions = undefined;
+      this.calendarLoadError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.calendarLoadInFlight = false;
+      this.display();
+    }
+  }
+
+  private async commitCalendarScope(syncAll: boolean): Promise<void> {
+    const previous = this.plugin.settings.selectedCalendarIds;
+    const previousInvalid = this.plugin.selectedCalendarIdsPersistedInvalid;
+    this.plugin.settings.selectedCalendarIds = syncAll ? null : [];
+    this.plugin.selectedCalendarIdsPersistedInvalid = false;
+    try {
+      await this.plugin.saveSettings();
+      this.display();
+    } catch (error) {
+      this.plugin.settings.selectedCalendarIds = previous;
+      this.plugin.selectedCalendarIdsPersistedInvalid = previousInvalid;
+      this.display();
+      new Notice(`Could not save Calendar selection: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async commitCalendarEnabled(calendarId: string, enabled: boolean): Promise<void> {
+    const previous = this.plugin.settings.selectedCalendarIds;
+    const previousInvalid = this.plugin.selectedCalendarIdsPersistedInvalid;
+    const selected = new Set(previous ?? []);
+    if (enabled) selected.add(calendarId);
+    else selected.delete(calendarId);
+    this.plugin.settings.selectedCalendarIds = [...selected];
+    this.plugin.selectedCalendarIdsPersistedInvalid = false;
+    try {
+      await this.plugin.saveSettings();
+      this.display();
+    } catch (error) {
+      this.plugin.settings.selectedCalendarIds = previous;
+      this.plugin.selectedCalendarIdsPersistedInvalid = previousInvalid;
+      this.display();
+      new Notice(`Could not save Calendar selection: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async commitEventHeadingLevel(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {

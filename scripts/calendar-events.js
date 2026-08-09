@@ -135,6 +135,77 @@ function readOptionalCalendar(event, warnings) {
   return calendarName;
 }
 
+function calendarInfo(calendar) {
+  var id = readOptionalProperty(calendar, "calendarIdentifier");
+  var title = readOptionalProperty(calendar, "title");
+  if (!id.available || !title.available) return null;
+  var calendarId = stringOrNull(id.value);
+  var calendarTitle = stringOrNull(title.value);
+  if (calendarId === null || calendarTitle === null) return null;
+  var source = readOptionalProperty(calendar, "source");
+  var sourceTitle = source.available && source.value !== null
+    ? stringOrNull(readOptionalProperty(source.value, "title").value)
+    : null;
+  return { id: calendarId, title: calendarTitle, source: sourceTitle };
+}
+
+function eventCalendars(store) {
+  var calendars;
+  try {
+    calendars = store.calendarsForEntityType($.EKEntityTypeEvent);
+  } catch (error) {
+    throw new Error("EventKit calendar query failed.");
+  }
+  var count = collectionCount(calendars);
+  if (count === null || typeof calendars.objectAtIndex !== "function") {
+    throw new Error("EventKit returned an invalid calendar collection.");
+  }
+  return calendars;
+}
+
+function parseSelectedCalendarIds(value) {
+  if (value === undefined) return null;
+  var ids;
+  try {
+    ids = JSON.parse(value);
+  } catch (error) {
+    throw new Error("Calendar selection must be valid JSON.");
+  }
+  if (!Array.isArray(ids) || !ids.every(function (id) { return typeof id === "string" && id.length > 0; })) {
+    throw new Error("Calendar selection must be an array of calendar identifiers.");
+  }
+  return ids;
+}
+
+function calendarsMatchingIds(store, ids) {
+  if (ids === null) return null;
+  var wanted = {};
+  ids.forEach(function (id) { wanted[id] = true; });
+  var calendars = eventCalendars(store);
+  var selected = $.NSMutableArray.alloc.init;
+  var count = collectionCount(calendars);
+  for (var index = 0; index < count; index += 1) {
+    var calendar = calendars.objectAtIndex(index);
+    var info = calendarInfo(calendar);
+    if (info !== null && wanted[info.id]) selected.addObject(calendar);
+  }
+  return selected;
+}
+
+function listCalendars() {
+  var calendars = eventCalendars(eventStore());
+  var result = [];
+  var count = collectionCount(calendars);
+  for (var index = 0; index < count; index += 1) {
+    var info = calendarInfo(calendars.objectAtIndex(index));
+    if (info !== null) result.push(info);
+  }
+  result.sort(function (left, right) {
+    return (left.source || "").localeCompare(right.source || "") || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+  });
+  return JSON.stringify(result);
+}
+
 function collectionCount(collection) {
   if (!collection) return null;
   try {
@@ -324,7 +395,7 @@ function readEventTitle(event, warnings) {
   return result.available ? stringOrNull(result.value) || "(Untitled event)" : "(Untitled event)";
 }
 
-function main(targetDate) {
+function main(targetDate, selectedCalendarIds) {
   if (typeof targetDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
     throw new Error("Calendar target date must be YYYY-MM-DD.");
   }
@@ -333,15 +404,24 @@ function main(targetDate) {
   var store = eventStore();
   var start = $.NSDate.dateWithTimeIntervalSince1970(range.start.getTime() / 1000);
   var end = $.NSDate.dateWithTimeIntervalSince1970(range.end.getTime() / 1000);
+  var calendars = calendarsMatchingIds(store, selectedCalendarIds);
   var predicate;
-  try {
-    predicate=store.predicateForEventsWithStartDateEndDateCalendars(start,end,null);
-  } catch (error) {
-    // Some JXA runtimes bridge a literal null as NSNull; undefined supplies Objective-C nil there.
+  if (calendars !== null) {
     try {
-      predicate=store.predicateForEventsWithStartDateEndDateCalendars(start,end,undefined);
-    } catch (fallbackError) {
-      throw new Error("EventKit predicate creation failed.");
+      predicate=store.predicateForEventsWithStartDateEndDateCalendars(start,end,calendars);
+    } catch (error) {
+      throw new Error("EventKit predicate creation failed for the selected calendars.");
+    }
+  } else {
+    try {
+      predicate=store.predicateForEventsWithStartDateEndDateCalendars(start,end,null);
+    } catch (error) {
+      // Some JXA runtimes bridge a literal null as NSNull; undefined supplies Objective-C nil there.
+      try {
+        predicate=store.predicateForEventsWithStartDateEndDateCalendars(start,end,undefined);
+      } catch (fallbackError) {
+        throw new Error("EventKit predicate creation failed.");
+      }
     }
   }
   var rawEvents;
@@ -405,6 +485,8 @@ function main(targetDate) {
 }
 
 function run(argv) {
-  if (!argv || argv.length !== 1) throw new Error("Calendar target date argument is required.");
-  return main(argv[0]);
+  if (!argv || !argv.length) throw new Error("Calendar target date argument is required.");
+  if (argv.length === 1 && argv[0] === "--list-calendars") return listCalendars();
+  if (argv.length > 2) throw new Error("Calendar target date and selection arguments are required.");
+  return main(argv[0], parseSelectedCalendarIds(argv[1]));
 }

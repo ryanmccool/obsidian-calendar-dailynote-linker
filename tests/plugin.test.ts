@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { replaceCalendarBlock } from "../src/block";
 import { buildPeopleIndex, matchAttendee, preparePeopleIndexForImport, preparePeopleLinks } from "../src/invitees";
 import { renderCalendarBlock, renderCalendarBlockWithSummary } from "../src/render";
-import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, parsePersistedPluginSettings, tryNormalizeEventHeadingLevel, tryNormalizeExcludedVaultFolders, tryNormalizeInsertionHeading, tryNormalizeSectionHeading } from "../src/settings";
+import { normalizeExcludedVaultFolders, normalizeSectionHeading, parsePersistedExcludedVaultFolders, parsePersistedPluginSettings, tryNormalizeEventHeadingLevel, tryNormalizeExcludedVaultFolders, tryNormalizeInsertionHeading, tryNormalizeSectionHeading, tryNormalizeSelectedCalendarIds } from "../src/settings";
 import { insertCalendarSection, relocateCalendarBlockAtCursor } from "../src/insertion";
 import { parseStandaloneAtxHeadings } from "../src/markdown";
 import { validateCalendarPayload } from "../src/calendarPayload";
-import { CalendarBridgeError, fetchCalendarPayload } from "../src/calendarBridge";
+import { CalendarBridgeError, fetchAvailableCalendars, fetchCalendarPayload } from "../src/calendarBridge";
 import { CALENDAR_EVENTS_SCRIPT } from "../src/calendarEventsSource";
 import {
   assertSameDailyNoteProvider,
@@ -571,25 +571,55 @@ describe("Calendar rendering", () => {
     expect(invalid).not.toContain("[No link](");
   });
 
-  it("does not use a title-only vault match as a rendering fallback", () => {
+  it("uses a unique basename or alias as a no-attendee title fallback", () => {
     const index = preparedPeople(buildPeopleIndex([
       { path: "Projects/Project.md", basename: "Project", frontmatter: {} },
       { path: "People/Ada.md", basename: "Ada", frontmatter: { aliases: ["Ada Lovelace"] } }
     ], []));
     const titleFallback = renderCalendarBlock(payload([event({ title: "Project" })]), "## Calendar", index);
     const modernTitleOnly = renderCalendarBlockWithSummary(payload([event({ title: "Project" })]), index);
-    expect(titleFallback).toContain("### Project\n9:00 AM–10:00 AM");
-    expect(titleFallback).not.toContain("Projects/Project");
-    expect(modernTitleOnly.block).toContain("### Project\n09:00 – 10:00");
-    expect(modernTitleOnly.block).not.toContain("Projects/Project");
+    const aliasFallback = renderCalendarBlockWithSummary(payload([event({ title: "Ada Lovelace planning" })]), index);
+    expect(titleFallback).toContain("### [[Projects/Project.md|Project]]\n9:00 AM–10:00 AM");
+    expect(modernTitleOnly.block).toContain("### [[Projects/Project.md|Project]]\n09:00 – 10:00");
+    expect(aliasFallback.block).toContain("### [[People/Ada.md|Ada Lovelace]] planning");
 
     const attendeeWins = renderCalendarBlock(payload([event({
-      title: "Project",
+      title: "Ada Project",
       attendees: [{ displayName: "Ada Lovelace", email: null, status: "unknown" }]
     })]), "## Calendar", index);
-    expect(attendeeWins).toContain("### Project\n9:00 AM–10:00 AM");
-    expect(attendeeWins).not.toContain("People/Ada");
-    expect(attendeeWins).not.toContain("[[Projects/Project.md|Project]]");
+    expect(attendeeWins).toContain("### [[People/Ada.md|Ada]] Project\n9:00 AM–10:00 AM");
+    expect(attendeeWins).not.toContain("Projects/Project");
+  });
+
+  it("selects the longest specific title-only phrase", () => {
+    const people = preparedPeople(buildPeopleIndex([
+      { path: "Projects/Cloud.md", basename: "Cloud", frontmatter: {} },
+      { path: "Projects/Cloud FinOps.md", basename: "Cloud FinOps", frontmatter: {} }
+    ], []));
+    const rendered = renderCalendarBlockWithSummary(payload([event({ title: "Cloud FinOps Weekly Meeting" })]), people);
+
+    expect(rendered.block).toContain("### [[Projects/Cloud FinOps.md|Cloud FinOps]] Weekly Meeting");
+    expect(rendered.block).not.toContain("Projects/Cloud.md");
+    expect(rendered.linkCount).toBe(1);
+  });
+
+  it("rejects ambiguous longest phrases and fragments inside words", () => {
+    const ambiguous = preparedPeople(buildPeopleIndex([
+      { path: "One/Cloud FinOps.md", basename: "Cloud FinOps", frontmatter: {} },
+      { path: "Two/Cloud FinOps.md", basename: "Cloud FinOps", frontmatter: {} }
+    ], []));
+    const ambiguousRendered = renderCalendarBlockWithSummary(payload([event({ title: "Cloud FinOps Weekly" })]), ambiguous);
+    expect(ambiguousRendered.block).toContain("### Cloud FinOps Weekly\n09:00 – 10:00");
+    expect(ambiguousRendered.linkCount).toBe(0);
+
+    const fragments = preparedPeople(buildPeopleIndex([
+      { path: "Projects/Cloud.md", basename: "Cloud", frontmatter: {} },
+      { path: "Projects/FinOps.md", basename: "FinOps", frontmatter: {} }
+    ], []));
+    const fragmentRendered = renderCalendarBlockWithSummary(payload([event({ title: "CloudFinOps Weekly" })]), fragments);
+    expect(fragmentRendered.block).toContain("### CloudFinOps Weekly\n09:00 – 10:00");
+    expect(fragmentRendered.block).not.toContain("Projects/");
+    expect(fragmentRendered.linkCount).toBe(0);
   });
 });
 
@@ -833,6 +863,15 @@ describe("People links and settings", () => {
     expect(invalidNewHeading.insertionHeading).toBe("# Notes");
   });
 
+  it("defaults to all calendars and accepts a distinct selected-calendar list", () => {
+    expect(parsePersistedPluginSettings({}).selectedCalendarIds).toEqual({ ids: null, malformed: false });
+    expect(parsePersistedPluginSettings({ selectedCalendarIds: ["one", "one", "two"] }).selectedCalendarIds)
+      .toEqual({ ids: ["one", "two"], malformed: false });
+    expect(tryNormalizeSelectedCalendarIds(["valid", "bad\nvalue"])).toBeUndefined();
+    expect(parsePersistedPluginSettings({ selectedCalendarIds: "not-an-array" }).selectedCalendarIds)
+      .toEqual({ ids: [], malformed: true, rawInput: "not-an-array" });
+  });
+
   it("normalizes only visible event headings from 3 through 6", () => {
     expect(tryNormalizeEventHeadingLevel(2)).toBe(3);
     expect(tryNormalizeEventHeadingLevel("2")).toBe(3);
@@ -889,6 +928,23 @@ describe("bridge and payload safety", () => {
     expect(result.targetDate).toBe("2025-01-15");
   });
 
+  it("passes explicitly selected Calendar identifiers to EventKit", async () => {
+    let args: string[] = [];
+    await fetchCalendarPayload("2025-01-15", ["calendar-a", "calendar-b"], async (_command, commandArgs) => {
+      args = commandArgs;
+      return { stdout: JSON.stringify(payload([])), stderr: "" };
+    });
+    expect(args[5]).toBe('["calendar-a","calendar-b"]');
+  });
+
+  it("lists available Calendar identifiers and display names", async () => {
+    const calendars = await fetchAvailableCalendars(async (_command, args) => {
+      expect(args[4]).toBe("--list-calendars");
+      return { stdout: JSON.stringify([{ id: "calendar-a", title: "Work", source: "iCloud" }]), stderr: "" };
+    });
+    expect(calendars).toEqual([{ id: "calendar-a", title: "Work", source: "iCloud" }]);
+  });
+
   it("rejects invalid bridge date arguments before spawning", async () => {
     await expect(fetchCalendarPayload("2025-02-30", async () => {
       throw new Error("runner must not be called");
@@ -908,7 +964,12 @@ describe("bridge and payload safety", () => {
     const source = readFileSync(resolve(process.cwd(), "scripts/calendar-events.js"), "utf8");
     expect(source).toContain('ObjC.import("EventKit")');
     expect(source).toContain("$.EKEventStore.alloc.initWithAccessToEntityTypes($.EKEntityMaskEvent)");
-    expect(source).toContain("predicateForEventsWithStartDateEndDateCalendars(start,end,null)");
+    expect(source).toContain("predicateForEventsWithStartDateEndDateCalendars(start,end,calendars)");
+    expect(source).toContain("EventKit predicate creation failed for the selected calendars.");
+    expect(source).toContain("calendars !== null");
+    expect(source).toContain("calendarsForEntityType($.EKEntityTypeEvent)");
+    expect(source).toContain("--list-calendars");
+    expect(source).toContain("calendarIdentifier");
     expect(source).toContain("authorizationStatusForEntityType");
     expect(source).toContain("var EVENTKIT_AUTH_FULL_ACCESS = 3;");
     expect(source).toContain("var EVENTKIT_AUTH_WRITE_ONLY = 4;");
@@ -1113,11 +1174,11 @@ describe("active Daily Note resolution and outcome summaries", () => {
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 0, 0))
       .toBe("No Calendar events found for 2025-01-14. The active Daily Note was updated.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 2, 0))
-      .toBe("Imported 2 Calendar events into 2025-01-14. No uniquely matched attendee names appeared in event titles.");
+      .toBe("Imported 2 Calendar events into 2025-01-14. No uniquely matched attendee names or title phrases appeared in event titles.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 2, 3))
-      .toBe("Imported 2 Calendar events into 2025-01-14 and added 3 vault links for attendee names present in event titles.");
+      .toBe("Imported 2 Calendar events into 2025-01-14 and added 3 vault links for matched attendee names or title phrases.");
     expect(summarizeImportOutcome("2025-01-14", "2025-01-14", 1, 1))
-      .toBe("Imported 1 Calendar event into 2025-01-14 and added 1 vault link for attendee names present in event titles.");
+      .toBe("Imported 1 Calendar event into 2025-01-14 and added 1 vault link for matched attendee names or title phrases.");
   });
 
   it("describes the configured destination, formatting, links, and relocation", () => {
@@ -1128,7 +1189,7 @@ describe("active Daily Note resolution and outcome summaries", () => {
       timeFormat: "24-hour",
       linkMatchingVaultNotes: true,
       linkEventTitles: true
-    })).toContain("under # Notes; Heading 3, 24-hour, attendee-name links on (title names only), Calendar URL links on (separate when needed); visible Calendar section updated");
+    })).toContain("under # Notes; Heading 3, 24-hour, vault-note links on (attendee/title phrases), Calendar URL links on (separate when needed); visible Calendar section updated");
   });
 
   it("rejects active-file identity, path, date, and configuration changes", () => {

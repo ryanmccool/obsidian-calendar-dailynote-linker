@@ -1,5 +1,7 @@
 export interface PluginSettings {
   excludedVaultFolders: string[];
+  /** null keeps the legacy behavior of importing every available calendar. */
+  selectedCalendarIds: string[] | null;
   insertionMode: InsertionMode;
   insertionHeading: string;
   eventHeadingLevel: EventHeadingLevel;
@@ -14,6 +16,7 @@ export type TimeFormat = "24-hour" | "12-hour";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   excludedVaultFolders: [],
+  selectedCalendarIds: null,
   insertionMode: "heading",
   insertionHeading: "# Notes",
   eventHeadingLevel: 3,
@@ -68,6 +71,36 @@ export function normalizeExcludedVaultFolders(value: unknown): string[] {
   const normalized = tryNormalizeExcludedVaultFolders(value);
   if (!normalized) throw new ExcludedVaultFolderError();
   return normalized;
+}
+
+export function tryNormalizeSelectedCalendarIds(value: unknown): string[] | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return undefined;
+  const calendarIds: string[] = [];
+  for (const id of value) {
+    if (!id || /[\u0000-\u001f\u007f-\u009f]/u.test(id)) return undefined;
+    if (!calendarIds.includes(id)) calendarIds.push(id);
+  }
+  return calendarIds;
+}
+
+export function normalizeSelectedCalendarIds(value: unknown): string[] | null {
+  const normalized = tryNormalizeSelectedCalendarIds(value);
+  if (normalized === undefined) throw new Error("Calendar selection is malformed. Correct it in settings before importing Calendar events.");
+  return normalized;
+}
+
+export interface PersistedSelectedCalendarIds {
+  ids: string[] | null;
+  malformed: boolean;
+  rawInput?: unknown;
+}
+
+export function parsePersistedSelectedCalendarIds(value: unknown): PersistedSelectedCalendarIds {
+  if (value === undefined || value === null) return { ids: null, malformed: false };
+  const normalized = tryNormalizeSelectedCalendarIds(value);
+  if (normalized !== undefined) return { ids: normalized, malformed: false };
+  return { ids: [], malformed: true, rawInput: value };
 }
 
 export interface PersistedExcludedVaultFolders {
@@ -143,6 +176,7 @@ export function normalizeBoolean(value: unknown, fallback: boolean): boolean {
 
 export interface PersistedPluginSettings {
   excludedVaultFolders: PersistedExcludedVaultFolders;
+  selectedCalendarIds: PersistedSelectedCalendarIds;
   insertionMode: InsertionMode;
   insertionHeading: string;
   eventHeadingLevel: EventHeadingLevel;
@@ -158,6 +192,7 @@ export function parsePersistedPluginSettings(value: unknown): PersistedPluginSet
     : {};
   return {
     excludedVaultFolders: parsePersistedExcludedVaultFolders(saved.excludedVaultFolders),
+    selectedCalendarIds: parsePersistedSelectedCalendarIds(saved.selectedCalendarIds),
     insertionMode: "heading",
     insertionHeading: "# Notes",
     eventHeadingLevel: normalizeEventHeadingLevel(saved.eventHeadingLevel),

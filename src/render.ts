@@ -269,7 +269,22 @@ function attendeeTitleLinkSources(
   });
 }
 
-function findTitleNameMatches(title: string, sources: readonly TitleLinkSource[]): TitleNameMatch[] {
+function titleOnlyLinkSources(people: PeopleIndex): TitleLinkSource[] {
+  const byPath = new Map<string, TitleLinkSource>();
+  for (const [name, targets] of people.byName) {
+    const normalizedName = normalizeName(name);
+    if (!normalizedName) continue;
+    for (const target of targets) {
+      if (!target.linkText) continue;
+      const source = byPath.get(target.path) ?? { target, names: [] };
+      if (!source.names.includes(normalizedName)) source.names.push(normalizedName);
+      byPath.set(target.path, source);
+    }
+  }
+  return [...byPath.values()];
+}
+
+function collectTitleNameMatches(title: string, sources: readonly TitleLinkSource[]): TitleNameMatch[] {
   if (!sources.some((source) => source.names.length > 0 && Boolean(source.target.linkText))) return [];
   const normalizedTitle = normalizeTitleWithSpans(title);
   const matches: TitleNameMatch[] = [];
@@ -300,6 +315,10 @@ function findTitleNameMatches(title: string, sources: readonly TitleLinkSource[]
     }
   }
 
+  return matches;
+}
+
+function selectNonOverlappingTitleMatches(matches: TitleNameMatch[]): TitleNameMatch[] {
   matches.sort((left, right) => {
     if (left.normalizedLength !== right.normalizedLength) return right.normalizedLength - left.normalizedLength;
     if (left.start !== right.start) return left.start - right.start;
@@ -312,6 +331,21 @@ function findTitleNameMatches(title: string, sources: readonly TitleLinkSource[]
     selected.push(match);
   }
   return selected.sort((left, right) => left.start - right.start);
+}
+
+function findTitleNameMatches(title: string, sources: readonly TitleLinkSource[]): TitleNameMatch[] {
+  return selectNonOverlappingTitleMatches(collectTitleNameMatches(title, sources));
+}
+
+function findTitleOnlyNameMatches(title: string, sources: readonly TitleLinkSource[]): TitleNameMatch[] {
+  const matches = collectTitleNameMatches(title, sources);
+  if (!matches.length) return [];
+
+  const longestLength = Math.max(...matches.map((match) => match.normalizedLength));
+  const longestMatches = matches.filter((match) => match.normalizedLength === longestLength);
+  const owners = new Set(longestMatches.map((match) => match.target.path));
+  if (owners.size !== 1) return [];
+  return selectNonOverlappingTitleMatches(longestMatches);
 }
 
 function escapeWikilinkDestination(value: string): string {
@@ -334,7 +368,14 @@ function renderTitleWithPeople(
   sources: readonly TitleLinkSource[],
   sanitizeTitle: (value: string) => string
 ): { title: string; linkCount: number } {
-  const matches = findTitleNameMatches(title, sources);
+  return renderTitleWithMatches(title, findTitleNameMatches(title, sources), sanitizeTitle);
+}
+
+function renderTitleWithMatches(
+  title: string,
+  matches: readonly TitleNameMatch[],
+  sanitizeTitle: (value: string) => string
+): { title: string; linkCount: number } {
   let rendered = "";
   let last = 0;
   let linkCount = 0;
@@ -357,7 +398,18 @@ function renderEventTitle(
   sanitizeTitle: (value: string) => string
 ): { title: string; linkCount: number } {
   if (!linkMatchingVaultNotes) return { title: sanitizeTitle(event.title), linkCount: 0 };
-  return renderTitleWithPeople(event.title, attendeeTitleLinkSources(people, event.attendees), sanitizeTitle);
+  const attendeeTitle = renderTitleWithPeople(
+    event.title,
+    attendeeTitleLinkSources(people, event.attendees),
+    sanitizeTitle
+  );
+  if (attendeeTitle.linkCount > 0) return attendeeTitle;
+
+  return renderTitleWithMatches(
+    event.title,
+    findTitleOnlyNameMatches(event.title, titleOnlyLinkSources(people)),
+    sanitizeTitle
+  );
 }
 
 function renderTitleWithCalendarUrl(

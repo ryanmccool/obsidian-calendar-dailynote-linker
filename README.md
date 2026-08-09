@@ -43,6 +43,10 @@ Timed events use the Calendar bridge's local timezone. An empty block uses the
 active note's target date rather than “today”. Calendar notes and locations are
 not inserted.
 
+## Calendar selection
+
+By default, imports include all event calendars available to macOS. In the plugin settings, turn off **Sync all calendars**, then select the individual calendars to sync. Use **Refresh calendars** to load the available Calendar names and accounts; this may request the same macOS Calendar permission used by imports. Selections use stable EventKit calendar identifiers, so calendars with the same display name remain distinct. With no individual calendars selected, imports intentionally contain no events.
+
 ## Vault matching and settings
 
 The plugin searches all Markdown notes in the vault by default. **Vault folders to exclude** accepts optional vault-relative folders, one per line; exclusions include subfolders and blank input searches all Markdown notes. The native textarea placeholder is:
@@ -55,7 +59,7 @@ Private/People
 
 Paths normalize only separators, preserve `~` and leading/trailing spaces in legitimate vault segments, and reject absolute paths, empty segments, `.` and `..`. Folder boundaries are exact, so `Private` does not exclude `Privateer`. Older `peopleFolder` settings are ignored during migration. When matching is enabled, a malformed saved exclusion disables matching and must be corrected in settings; it never silently falls back to a whole-vault search. When matching is disabled, exclusions are not read and no vault index or metadata is accessed.
 
-Attendees match by normalized email first, then normalized display name. A key must belong to exactly one Markdown note through its basename, `aliases`, `email`, or `emails` frontmatter. If no attendee produces a unique link, the event title is tried against a unique basename or alias. Ambiguous attendee and title matches never link. Links are generated with Obsidian's file manager and can target notes anywhere in the non-excluded vault.
+Attendees match by normalized email first, then normalized display name. A key must belong to exactly one Markdown note through its basename, `aliases`, `email`, or `emails` frontmatter. If attendee-based title linking produces no link, the event title is tried against normalized basename and alias phrases using whole-phrase boundaries. The longest matching phrase links only when it uniquely resolves to one note; ambiguous attendee and title matches never link. Links are generated with Obsidian's file manager and can target notes anywhere in the non-excluded vault.
 
 ## Insertion and formatting settings
 

@@ -12,6 +12,12 @@ export interface CalendarProcessResult {
   stderr: string;
 }
 
+export interface CalendarInfo {
+  id: string;
+  title: string;
+  source: string | null;
+}
+
 export type CalendarCommandRunner = (
   executable: string,
   args: string[],
@@ -66,7 +72,73 @@ function rejectedCommandDetails(error: unknown): { details: string; code: string
   };
 }
 
-export async function fetchCalendarPayload(targetDate: string, run: CalendarCommandRunner = defaultRunner): Promise<CalendarPayload> {
+function calendarArgs(targetDate: string, selectedCalendarIds: string[] | null): string[] {
+  return selectedCalendarIds === null
+    ? ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, targetDate]
+    : ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, targetDate, JSON.stringify(selectedCalendarIds)];
+}
+
+function parseCalendarList(output: string): CalendarInfo[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("EventKit returned invalid calendar data.");
+  }
+  if (!Array.isArray(parsed)) throw new Error("EventKit returned invalid calendar data.");
+  const calendars: CalendarInfo[] = [];
+  for (const calendar of parsed) {
+    if (typeof calendar !== "object" || calendar === null || Array.isArray(calendar)) {
+      throw new Error("EventKit returned invalid calendar data.");
+    }
+    const { id, title, source } = calendar as Record<string, unknown>;
+    if (
+      typeof id !== "string" || !id || /[\u0000-\u001f\u007f-\u009f]/u.test(id) ||
+      typeof title !== "string" || !title || /[\u0000-\u001f\u007f-\u009f]/u.test(title) ||
+      (source !== null && (typeof source !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(source)))
+    ) {
+      throw new Error("EventKit returned invalid calendar data.");
+    }
+    calendars.push({ id, title, source });
+  }
+  return calendars;
+}
+
+export async function fetchAvailableCalendars(run: CalendarCommandRunner = defaultRunner): Promise<CalendarInfo[]> {
+  let result: CalendarProcessResult;
+  try {
+    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, "--list-calendars"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+      shell: false,
+      windowsHide: true
+    });
+  } catch (error) {
+    const failure = rejectedCommandDetails(error);
+    if (failure.code) throw new CalendarBridgeError(permissionMessage(failure.code), true);
+    throw new CalendarBridgeError(nativeFailureMessage(failure.details));
+  }
+  const output = result.stdout.trim();
+  if (!output) {
+    const code = permissionCode(result.stderr);
+    if (code) throw new CalendarBridgeError(permissionMessage(code), true);
+    throw new CalendarBridgeError(nativeFailureMessage(sanitizedDetails(result.stderr)));
+  }
+  try {
+    return parseCalendarList(output);
+  } catch (error) {
+    throw new CalendarBridgeError(nativeFailureMessage(sanitizedDetails(error instanceof Error ? error.message : String(error))));
+  }
+}
+
+export async function fetchCalendarPayload(
+  targetDate: string,
+  selectedCalendarIdsOrRun: string[] | null | CalendarCommandRunner = null,
+  suppliedRun: CalendarCommandRunner = defaultRunner
+): Promise<CalendarPayload> {
+  const selectedCalendarIds = typeof selectedCalendarIdsOrRun === "function" ? null : selectedCalendarIdsOrRun;
+  const run = typeof selectedCalendarIdsOrRun === "function" ? selectedCalendarIdsOrRun : suppliedRun;
   try {
     validateTargetDate(targetDate);
   } catch (error) {
@@ -74,7 +146,7 @@ export async function fetchCalendarPayload(targetDate: string, run: CalendarComm
   }
   let result: { stdout: string; stderr: string };
   try {
-    result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", CALENDAR_EVENTS_SCRIPT, targetDate], {
+    result = await run("/usr/bin/osascript", calendarArgs(targetDate, selectedCalendarIds), {
       encoding: "utf8",
       timeout: 30_000,
       maxBuffer: 2 * 1024 * 1024,
