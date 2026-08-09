@@ -10,8 +10,6 @@ import {
   parsePersistedPluginSettings,
   tryNormalizeEventHeadingLevel,
   tryNormalizeExcludedVaultFolders,
-  tryNormalizeInsertionHeading,
-  tryNormalizeInsertionMode,
   tryNormalizeTimeFormat,
   type PluginSettings
 } from "./settings";
@@ -27,8 +25,7 @@ import {
 } from "./dailyNoteProviders";
 import {
   CalendarInsertionError,
-  insertCalendarBlockBelowHeading,
-  relocateCalendarBlockAtCursor
+  insertCalendarSection
 } from "./insertion";
 
 export default class CalendarDailyNoteLinkerPlugin extends Plugin {
@@ -66,12 +63,8 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     const excludedVaultFolders = normalizeExcludedVaultFolders(this.settings.excludedVaultFolders);
-    const insertionHeading = tryNormalizeInsertionHeading(this.settings.insertionHeading);
-    if (!insertionHeading) throw new Error("Insertion heading must be a Markdown heading from # to ######, such as # Notes.");
-    const insertionMode = tryNormalizeInsertionMode(this.settings.insertionMode);
-    if (!insertionMode) throw new Error("Insert Calendar events must be set to Below a heading or At the cursor.");
     const eventHeadingLevel = tryNormalizeEventHeadingLevel(this.settings.eventHeadingLevel);
-    if (!eventHeadingLevel) throw new Error("Event heading level must be Heading 2 through Heading 6.");
+    if (!eventHeadingLevel) throw new Error("Event heading level must be Heading 3 through Heading 6.");
     const timeFormat = tryNormalizeTimeFormat(this.settings.timeFormat);
     if (!timeFormat) throw new Error("Time format must be 24-hour or 12-hour.");
     if (typeof this.settings.linkMatchingVaultNotes !== "boolean" || typeof this.settings.linkEventTitles !== "boolean") {
@@ -80,8 +73,8 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
 
     this.settings = {
       excludedVaultFolders,
-      insertionMode,
-      insertionHeading,
+      insertionMode: "heading",
+      insertionHeading: "# Notes",
       eventHeadingLevel,
       timeFormat,
       linkMatchingVaultNotes: normalizeBoolean(this.settings.linkMatchingVaultNotes, DEFAULT_SETTINGS.linkMatchingVaultNotes),
@@ -192,22 +185,13 @@ export default class CalendarDailyNoteLinkerPlugin extends Plugin {
       assertSameDailyNoteProvider(initialProvider, currentProvider);
 
       const editor = this.activeMarkdownEditor(activeFile);
-      if (this.settings.insertionMode === "cursor") {
-        if (!editor) {
-          throw new ActiveDailyNoteError("At the cursor requires the active Daily Note's Markdown editor and a usable cursor; import aborted without changing the note.");
-        }
-        const editorContent = editor.getValue();
-        const cursor = editor.getCursor();
-        const cursorOffset = editor.posToOffset(cursor);
-        const relocation = relocateCalendarBlockAtCursor(editorContent, rendered.block, cursorOffset);
-        this.replaceEditorContent(editor, editorContent, relocation.content);
-      } else if (editor) {
+      if (editor) {
         // Apply a targeted Editor change so unsaved buffer edits are retained.
         const editorContent = editor.getValue();
-        const relocated = insertCalendarBlockBelowHeading(editorContent, rendered.block, this.settings.insertionHeading);
+        const relocated = insertCalendarSection(editorContent, rendered.block);
         this.replaceEditorContent(editor, editorContent, relocated);
       } else {
-        await this.app.vault.process(activeFile, (content) => insertCalendarBlockBelowHeading(content, rendered.block, this.settings.insertionHeading));
+        await this.app.vault.process(activeFile, (content) => insertCalendarSection(content, rendered.block));
       }
       finish(summarizeImportOutcome(targetDate, activeFile.basename, rendered.eventCount, rendered.linkCount, this.settings));
     } catch (error) {
@@ -237,36 +221,12 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
       containerEl.createEl("p", { text: "Saved vault folder exclusions are invalid; correct them before importing Calendar events." });
     }
 
-    containerEl.createEl("h3", { text: "Insertion" });
-    new Setting(containerEl)
-      .setName("Insert Calendar events")
-      .setDesc("Choose where the managed Calendar block is placed in the active Daily Note.")
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption("heading", "Below a heading")
-          .addOption("cursor", "At the cursor")
-          .setValue(this.plugin.settings.insertionMode)
-          .onChange((value) => { void this.commitInsertionMode(dropdown, value); });
-      });
-
-    if (this.plugin.settings.insertionMode === "heading") {
-      new Setting(containerEl)
-        .setName("Insertion heading")
-        .setDesc("The managed block appears immediately below this exact standalone Markdown heading; outer incidental whitespace is trimmed, internal whitespace is preserved, and the field saves on blur. Older sectionHeading content is not used as the destination.")
-        .addText((text) => {
-          text
-            .setPlaceholder(DEFAULT_SETTINGS.insertionHeading)
-            .setValue(this.plugin.settings.insertionHeading);
-          text.inputEl.addEventListener("blur", () => { void this.commitInsertionHeading(text); });
-        });
-    }
-
     containerEl.createEl("h3", { text: "Formatting" });
     new Setting(containerEl)
       .setName("Event heading level")
       .setDesc("Each event title is rendered as a Markdown heading.")
       .addDropdown((dropdown) => {
-        for (const level of [2, 3, 4, 5, 6] as const) dropdown.addOption(String(level), `Heading ${level}`);
+        for (const level of [3, 4, 5, 6] as const) dropdown.addOption(String(level), `Heading ${level}`);
         dropdown
           .setValue(String(this.plugin.settings.eventHeadingLevel))
           .onChange((value) => { void this.commitEventHeadingLevel(dropdown, value); });
@@ -311,46 +271,8 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
       });
 
     containerEl.createEl("p", {
-      text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date and relocates its one managed Calendar block."
+      text: "Open an existing configured Daily Note, then run the command; it updates that open note for its date and replaces the visible ## Calendar section under # Notes."
     });
-  }
-
-  private async commitInsertionMode(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {
-    const previous = this.plugin.settings.insertionMode;
-    const normalized = tryNormalizeInsertionMode(value);
-    if (!normalized) {
-      dropdown.setValue(previous);
-      new Notice("Choose Below a heading or At the cursor.");
-      return;
-    }
-    this.plugin.settings.insertionMode = normalized;
-    try {
-      await this.plugin.saveSettings();
-      this.display();
-    } catch (error) {
-      this.plugin.settings.insertionMode = previous;
-      dropdown.setValue(previous);
-      new Notice(`Could not save insertion mode: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  private async commitInsertionHeading(text: import("obsidian").TextComponent): Promise<void> {
-    const previous = this.plugin.settings.insertionHeading;
-    const normalized = tryNormalizeInsertionHeading(text.getValue());
-    if (!normalized) {
-      text.setValue(previous);
-      new Notice("Use an exact Markdown heading from # to ######, such as # Notes.");
-      return;
-    }
-    this.plugin.settings.insertionHeading = normalized;
-    text.setValue(normalized);
-    try {
-      await this.plugin.saveSettings();
-    } catch (error) {
-      this.plugin.settings.insertionHeading = previous;
-      text.setValue(previous);
-      new Notice(`Could not save the Insertion heading: ${error instanceof Error ? error.message : String(error)}`);
-    }
   }
 
   private async commitEventHeadingLevel(dropdown: import("obsidian").DropdownComponent, value: string): Promise<void> {
@@ -358,7 +280,7 @@ class CalendarDailyNoteLinkerSettingTab extends PluginSettingTab {
     const normalized = tryNormalizeEventHeadingLevel(value);
     if (!normalized) {
       dropdown.setValue(String(previous));
-      new Notice("Choose an event heading level from Heading 2 through Heading 6.");
+      new Notice("Choose an event heading level from Heading 3 through Heading 6.");
       return;
     }
     this.plugin.settings.eventHeadingLevel = normalized;

@@ -1,7 +1,7 @@
 {
   "id": "calendar-daily-note-linker",
   "name": "Calendar Daily Note Linker",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "minAppVersion": "1.5.0",
   "description": "Import macOS Calendar events for the active Daily Note date with deterministic vault links.",
   "author": "Calendar Daily Note Linker contributors",

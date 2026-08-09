@@ -12,7 +12,7 @@ export interface CalendarRenderOptions {
 }
 
 export const DEFAULT_RENDER_OPTIONS: CalendarRenderOptions = {
-  eventHeadingLevel: 2,
+  eventHeadingLevel: 3,
   timeFormat: "24-hour",
   linkMatchingVaultNotes: true,
   linkEventTitles: true
@@ -380,7 +380,8 @@ function renderEvent(
   const eventUrl = options.linkEventTitles ? httpUrl(event.url) : null;
   const renderedTitle = renderEventTitle(event, people, options.linkMatchingVaultNotes, sanitizeEventHeadingTitle);
   const title = renderTitleWithCalendarUrl(renderedTitle, eventUrl);
-  const heading = `${"#".repeat(options.eventHeadingLevel)} ${title}`;
+  const headingLevel = Math.min(6, Math.max(3, options.eventHeadingLevel));
+  const heading = `${"#".repeat(headingLevel)} ${title}`;
   const when = event.allDay
     ? "All day"
     : `${formatLocalTime(event.start, payload.range.timeZone, options.timeFormat)} – ${formatLocalTime(event.end, payload.range.timeZone, options.timeFormat)}`;
@@ -420,7 +421,8 @@ function renderLegacyCalendarBlock(
   heading: string,
   people: PeopleIndex
 ): CalendarRenderResult {
-  const lines = [heading];
+  void heading;
+  const lines: string[] = [];
   const events = deduplicateEvents(payload.events).sort(eventSort);
   let linkCount = 0;
   if (!events.length) {
@@ -433,7 +435,7 @@ function renderLegacyCalendarBlock(
       const when = event.allDay
         ? "All day"
         : `${formatLocalTime(event.start, payload.range.timeZone, "12-hour")}–${formatLocalTime(event.end, payload.range.timeZone, "12-hour")}`;
-      lines.push(title);
+      lines.push(`### ${title}`);
       lines.push(when);
       linkCount += renderedTitle.linkCount;
     }

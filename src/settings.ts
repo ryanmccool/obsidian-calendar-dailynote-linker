@@ -1,5 +1,3 @@
-import { isStandaloneAtxHeadingText } from "./markdown";
-
 export interface PluginSettings {
   excludedVaultFolders: string[];
   insertionMode: InsertionMode;
@@ -11,14 +9,14 @@ export interface PluginSettings {
 }
 
 export type InsertionMode = "heading" | "cursor";
-export type EventHeadingLevel = 2 | 3 | 4 | 5 | 6;
+export type EventHeadingLevel = 3 | 4 | 5 | 6;
 export type TimeFormat = "24-hour" | "12-hour";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   excludedVaultFolders: [],
   insertionMode: "heading",
   insertionHeading: "# Notes",
-  eventHeadingLevel: 2,
+  eventHeadingLevel: 3,
   timeFormat: "24-hour",
   linkMatchingVaultNotes: true,
   linkEventTitles: true
@@ -94,17 +92,7 @@ export function parsePersistedExcludedVaultFolders(value: unknown): PersistedExc
 }
 
 export function tryNormalizeInsertionHeading(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  if (/[\r\n\u2028\u2029]/u.test(value) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
-    return undefined;
-  }
-  const heading = value.trim();
-  if (!isStandaloneAtxHeadingText(heading) || heading.includes("<!--") || heading.includes("-->") || heading.includes("\0")) {
-    return undefined;
-  }
-  return heading;
+  return value === "# Notes" ? "# Notes" : undefined;
 }
 
 export function normalizeInsertionHeading(value: unknown): string {
@@ -112,14 +100,16 @@ export function normalizeInsertionHeading(value: unknown): string {
 }
 
 // Kept for source compatibility with callers that still parse the old field.
-// New settings use normalizeInsertionHeading and default to # Notes.
-export const tryNormalizeSectionHeading = tryNormalizeInsertionHeading;
-export function normalizeSectionHeading(value: unknown): string {
-  return tryNormalizeSectionHeading(value) ?? "## Calendar";
+// The visible section is always ## Calendar.
+export function tryNormalizeSectionHeading(value: unknown): string | undefined {
+  return value === "## Calendar" ? "## Calendar" : undefined;
+}
+export function normalizeSectionHeading(_value: unknown): string {
+  return "## Calendar";
 }
 
 export function tryNormalizeInsertionMode(value: unknown): InsertionMode | undefined {
-  return value === "heading" || value === "cursor" ? value : undefined;
+  return value === "heading" || value === "cursor" ? "heading" : undefined;
 }
 
 export function normalizeInsertionMode(value: unknown): InsertionMode {
@@ -128,8 +118,10 @@ export function normalizeInsertionMode(value: unknown): InsertionMode {
 
 export function tryNormalizeEventHeadingLevel(value: unknown): EventHeadingLevel | undefined {
   const numeric = typeof value === "string" && /^\d+$/u.test(value) ? Number(value) : value;
-  return numeric === 2 || numeric === 3 || numeric === 4 || numeric === 5 || numeric === 6
-    ? numeric
+  return numeric === 2
+    ? 3
+    : numeric === 3 || numeric === 4 || numeric === 5 || numeric === 6
+      ? numeric
     : undefined;
 }
 
@@ -164,13 +156,10 @@ export function parsePersistedPluginSettings(value: unknown): PersistedPluginSet
   const saved = typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  // sectionHeading was the old heading rendered inside the managed block, not
-  // an insertion destination. New installations and migrations use # Notes.
-  const insertionHeadingValue = saved.insertionHeading;
   return {
     excludedVaultFolders: parsePersistedExcludedVaultFolders(saved.excludedVaultFolders),
-    insertionMode: normalizeInsertionMode(saved.insertionMode),
-    insertionHeading: normalizeInsertionHeading(insertionHeadingValue),
+    insertionMode: "heading",
+    insertionHeading: "# Notes",
     eventHeadingLevel: normalizeEventHeadingLevel(saved.eventHeadingLevel),
     timeFormat: normalizeTimeFormat(saved.timeFormat),
     linkMatchingVaultNotes: normalizeBoolean(saved.linkMatchingVaultNotes, DEFAULT_SETTINGS.linkMatchingVaultNotes),

@@ -10,9 +10,8 @@ export interface ImportSummaryOptions {
 }
 
 function destinationDescription(options: ImportSummaryOptions): string {
-  return options.insertionMode === "heading"
-    ? `below ${options.insertionHeading}`
-    : "at the active editor cursor";
+  void options;
+  return "under # Notes";
 }
 
 function formattingDescription(options: ImportSummaryOptions): string {
@@ -42,7 +41,7 @@ export function summarizeImportOutcome(
     return `Imported ${eventCount} Calendar ${eventLabel} into ${noteName} and added ${linkCount} vault ${linkLabel} for attendee names present in event titles.`;
   }
 
-  const mode = `${destinationDescription(options)}; ${formattingDescription(options)}; managed block relocated`;
+  const mode = `${destinationDescription(options)}; ${formattingDescription(options)}; visible Calendar section updated`;
   if (eventCount === 0) {
     return `No Calendar events found for ${targetDate}; updated ${noteName} (${mode}).`;
   }

@@ -1,7 +1,6 @@
 import {
-  findCalendarBlockRange,
-  removeCalendarBlock,
-  validateGeneratedBlock,
+  replaceOrCreateCalendarSection,
+  CalendarBlockError,
   type CalendarBlockRange
 } from "./block";
 import { parseStandaloneAtxHeadings } from "./markdown";
@@ -13,30 +12,22 @@ export class CalendarInsertionError extends Error {
   }
 }
 
-function newlineFor(noteContent: string): string {
-  return noteContent.includes("\r\n") ? "\r\n" : "\n";
-}
-
 export function findExactHeadingOffsets(noteContent: string, heading: string): number[] {
   return parseStandaloneAtxHeadings(noteContent)
     .filter((candidate) => candidate.text === heading)
     .map((candidate) => candidate.start);
 }
 
-function insertBelowOffset(noteContent: string, headingOffset: number, heading: string, block: string): string {
-  const headingLine = parseStandaloneAtxHeadings(noteContent)
-    .find((line) => line.start === headingOffset && line.text === heading);
-  if (!headingLine) throw new CalendarInsertionError("The configured insertion heading could not be located.");
-  const newline = newlineFor(noteContent);
-  const lineBreakLength = noteContent.startsWith("\r\n", headingLine.contentEnd)
-    ? 2
-    : noteContent[headingLine.contentEnd] === "\n"
-      ? 1
-      : 0;
-  const hasLineBreak = lineBreakLength > 0;
-  const separator = newline;
-  const blockSuffix = hasLineBreak ? newline : "";
-  return `${noteContent.slice(0, headingLine.contentEnd)}${separator}${block}${blockSuffix}${noteContent.slice(headingLine.contentEnd + lineBreakLength)}`;
+/** Replace or create the fixed visible Calendar section under the unique # Notes heading. */
+export function insertCalendarSection(noteContent: string, block: string): string {
+  try {
+    return replaceOrCreateCalendarSection(noteContent, block);
+  } catch (error) {
+    if (error instanceof CalendarBlockError) {
+      throw new CalendarInsertionError(`${error.message}; import aborted without changing the note.`);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -49,17 +40,10 @@ export function insertCalendarBlockBelowHeading(
   block: string,
   heading: string
 ): string {
-  validateGeneratedBlock(block);
-  const oldRange = findCalendarBlockRange(noteContent);
-  const withoutOldBlock = oldRange ? removeCalendarBlock(noteContent) : noteContent;
-  const headingOffsets = findExactHeadingOffsets(withoutOldBlock, heading);
-  if (headingOffsets.length === 0) {
-    throw new CalendarInsertionError(`The insertion heading ${heading} was not found exactly once; import aborted without changing the note.`);
+  if (heading !== "# Notes") {
+    throw new CalendarInsertionError("Calendar sections are fixed under the unique # Notes heading.");
   }
-  if (headingOffsets.length > 1) {
-    throw new CalendarInsertionError(`The insertion heading ${heading} must appear exactly once; it appears ${headingOffsets.length} times, so import aborted without changing the note.`);
-  }
-  return insertBelowOffset(withoutOldBlock, headingOffsets[0], heading, block);
+  return insertCalendarSection(noteContent, block);
 }
 
 export function relocateCalendarBlock(
@@ -68,8 +52,8 @@ export function relocateCalendarBlock(
   insertionMode: "heading" | "cursor",
   insertionHeading: string
 ): string {
-  if (insertionMode === "heading") return insertCalendarBlockBelowHeading(noteContent, block, insertionHeading);
-  throw new CalendarInsertionError("Cursor insertion requires an active Markdown editor.");
+  if (insertionMode === "cursor") throw new CalendarInsertionError("Cursor insertion is no longer supported; Calendar is fixed under # Notes.");
+  return insertCalendarSection(noteContent, block);
 }
 
 /** Map a cursor offset from the original buffer to the buffer after removal. */
@@ -94,20 +78,8 @@ export function relocateCalendarBlockAtCursor(
   block: string,
   cursorOffset: number
 ): CursorRelocationResult {
-  validateGeneratedBlock(block);
-  if (!Number.isSafeInteger(cursorOffset) || cursorOffset < 0 || cursorOffset > noteContent.length) {
-    throw new CalendarInsertionError("The active editor cursor is unavailable; import aborted without changing the note.");
-  }
-  const oldRange = findCalendarBlockRange(noteContent);
-  const insertionOffset = calculateCursorInsertionOffset(cursorOffset, oldRange);
-  const withoutOldBlock = oldRange ? removeCalendarBlock(noteContent) : noteContent;
-  const needsLeadingLineBreak = insertionOffset > 0 && withoutOldBlock[insertionOffset - 1] !== "\n";
-  const needsTrailingLineBreak = insertionOffset < withoutOldBlock.length && withoutOldBlock[insertionOffset] !== "\n";
-  const leadingLineBreak = needsLeadingLineBreak ? newlineFor(withoutOldBlock) : "";
-  const trailingLineBreak = needsTrailingLineBreak ? newlineFor(withoutOldBlock) : "";
-  return {
-    content: `${withoutOldBlock.slice(0, insertionOffset)}${leadingLineBreak}${block}${trailingLineBreak}${withoutOldBlock.slice(insertionOffset)}`,
-    insertionOffset,
-    oldRange
-  };
+  void noteContent;
+  void block;
+  void cursorOffset;
+  throw new CalendarInsertionError("Cursor insertion is no longer supported; Calendar is fixed under # Notes.");
 }
